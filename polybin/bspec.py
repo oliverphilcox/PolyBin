@@ -60,6 +60,7 @@ class BSpec():
             l1 = self.min_l+(bin1+0.5)*self.dl
             l2 = self.min_l+(bin2+0.5)*self.dl
             l3 = self.min_l+(bin3+0.5)*self.dl
+            if (-1)**(l1+l2+l3)==-1: return 0 
             if l3<abs(l1-l2) or l3>l1+l2:
                 return 0
             else:

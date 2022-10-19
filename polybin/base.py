@@ -47,6 +47,46 @@ class PolyBin():
         """Convert from harmonic-space to map-space"""
         return healpy.alm2map(input_lm,self.Nside,pol=False)
 
+    def to_lm_spin(self, input_map_plus, input_map_minus, spin):
+        """Convert (+-s)A from map-space to harmonic-space, weighting by (+-s)Y_{lm}. Our convention definitions follow HEALPix.
+        
+        The inputs are [(+s)M(n), (-s)M(n)] and the outputs are [(+s)M_lm, (-s)M_lm]
+        """
+        assert spin>=1, "Spin must be positive!"
+        assert type(spin)==int, "Spin must be an integer!"
+        
+        # Define inputs
+        map_inputs = [np.real((input_map_plus+input_map_minus)/2.), np.real((input_map_plus-input_map_minus)/(2.0j))]
+        
+        # Perform transformation
+        lm_outputs = healpy.map2alm_spin(map_inputs,spin,self.lmax)
+        
+        # Reconstruct output
+        lm_plus = -(lm_outputs[0]+1.0j*lm_outputs[1])
+        lm_minus = -1*(-1)**spin*(lm_outputs[0]-1.0j*lm_outputs[1])
+        
+        return lm_plus, lm_minus
+
+    def to_map_spin(self, input_lm_plus, input_lm_minus, spin):
+        """Convert (+-s)A_lm from harmonic-space to map-space, weighting by (+-s)Y_{lm}. Our convention definitions follow HEALPix.
+        
+        The inputs are [(+s)M_lm, (-s)M_lm] and the outputs are [(+s)M(n), (-s)M(n)]
+        """
+        assert spin>=1, "Spin must be positive!"
+        assert type(spin)==int, "Spin must be an integer!"
+        
+        # Define inputs
+        lm_inputs = [-(input_lm_plus+(-1)**spin*input_lm_minus)/2.,-(input_lm_plus-(-1)**spin*input_lm_minus)/(2.0j)]
+        
+        # Perform transformation
+        map_outputs = healpy.alm2map_spin(lm_inputs,self.Nside,spin,self.lmax)
+        
+        # Reconstruct output
+        map_plus = map_outputs[0]+1.0j*map_outputs[1]
+        map_minus = map_outputs[0]-1.0j*map_outputs[1]
+        
+        return map_plus, map_minus
+
     def safe_divide(self, x, y):
         """Function to divide maps without zero errors."""
         out = np.zeros_like(x)
