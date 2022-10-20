@@ -1,7 +1,6 @@
 ### Code for ideal and unwindowed binned polyspectrum estimation on the full-sky. Author: Oliver Philcox (2022)
 ## This module contains the parity-odd and parity-even trispectrum estimation code
 
-import healpy
 import numpy as np
 import multiprocessing as mp
 import tqdm
@@ -20,33 +19,33 @@ class TSpec():
     - include_partial_triangles: whether to include triangles (in l1,l2,L or l3,l4,L) whose centers don't satisfy the triangle conditions. (Default: False)
     """
     def __init__(self, base, mask, applySinv, min_l, dl, Nl, include_partial_triangles=False):
-            # Read in attributes
-            self.base = base
-            self.mask = mask
-            self.applySinv = applySinv
-            self.min_l = min_l
-            self.dl = dl
-            self.Nl = Nl
-            self.include_partial_triangles = include_partial_triangles
-            
-            if min_l+Nl*dl>base.lmax:
-                raise Exception("Maximum l is larger than HEALPix resolution!")
-            print("Binning: %d bins in [%d, %d]"%(Nl,min_l,min_l+Nl*dl))
-            
-            # Define l filters
-            self.ell_bins = [(self.base.l_arr>=self.min_l+self.dl*bin1)&(self.base.l_arr<self.min_l+self.dl*(bin1+1)) for bin1 in range(self.Nl)]
-            self.phase_factor = (-1.)**self.base.l_arr
+        # Read in attributes
+        self.base = base
+        self.mask = mask
+        self.applySinv = applySinv
+        self.min_l = min_l
+        self.dl = dl
+        self.Nl = Nl
+        self.include_partial_triangles = include_partial_triangles
+        
+        if min_l+Nl*dl>base.lmax:
+            raise Exception("Maximum l is larger than HEALPix resolution!")
+        print("Binning: %d bins in [%d, %d]"%(Nl,min_l,min_l+Nl*dl))
+        
+        # Define l filters
+        self.ell_bins = [(self.base.l_arr>=self.min_l+self.dl*bin1)&(self.base.l_arr<self.min_l+self.dl*(bin1+1)) for bin1 in range(self.Nl)]
+        self.phase_factor = (-1.)**self.base.l_arr
 
-            # Define m weights (for complex conjugates)
-            self.m_weight = (1.+1.*(self.base.m_arr>0.))
+        # Define m weights (for complex conjugates)
+        self.m_weight = (1.+1.*(self.base.m_arr>0.))
 
-            # Define wigner calculator
-            wig.wig_table_init(self.base.lmax*2,9)
-            wig.wig_temp_init(self.base.lmax*2)
+        # Define wigner calculator
+        wig.wig_table_init(self.base.lmax*2,9)
+        wig.wig_temp_init(self.base.lmax*2)
 
-            # Define 3j with specified spins, and 6j
-            self.threej = lambda l1,l2,l3: wig.wig3jj(2*l1,2*l2,2*l3,-1,-1,2)
-            self.sixj = lambda l1,l2,l3,l4,l5,l6: wig.wig6jj(2*l1,2*l2,2*l3,2*l4,2*l5,2*l6)
+        # Define 3j with specified spins, and 6j
+        self.threej = lambda l1,l2,l3: wig.wig3jj(2*l1,2*l2,2*l3,2*-1,2*-1,2*2)
+        self.sixj = lambda l1,l2,l3,l4,l5,l6: wig.wig6jj(2*l1,2*l2,2*l3,2*l4,2*l5,2*l6)
 
     def _check_bin(self, bin1, bin2, bin3, even=False):
         """Return one if modes in the bin satisfy the triangle conditions, or zero else.
@@ -352,6 +351,7 @@ class TSpec():
                 for bin3 in range(bin1,self.Nl):
                     for bin4 in range(bin3,self.Nl):
                         if bin1==bin3 and bin4<bin2: continue
+                        if bin1==bin3 and bin2==bin4 and parity=='odd': continue
                         for binL in range(self.Nl):
                             # skip bins outside the triangle conditions
                             if not self._check_bin(bin1,bin2,binL,even=False): continue
@@ -359,13 +359,14 @@ class TSpec():
                             
                             # Update indices
                             index1e += 1
-                            if bin2!=bin4: index1o += 1 # no equal bins!
-                    
+                            if ((bin1==bin3)*(bin2==bin4))!=1:
+                                index1o += 1 # no equal bins!
+                            
                             if verb and parity!='odd':
                                 if (index1e+1)%5==0: print("Computing bin %d of %d"%(index1e+1,self.N_t_even))
                             if verb and parity=='odd':
                                 if (index1o+1)%5==0: print("Computing bin %d of %d"%(index1o+1,self.N_t_odd))
-                            
+                                    
                             # Iterate over second set of bins
                             index2e = -1
                             index2o = -1
@@ -374,6 +375,7 @@ class TSpec():
                                     for bin3p in range(bin1p,self.Nl):
                                         for bin4p in range(bin3p,self.Nl):
                                             if bin1p==bin3p and bin4p<bin2p: continue
+                                            if bin1p==bin3p and bin2p==bin4p and parity=='odd': continue
                                             for binLp in range(self.Nl):
                                                 # skip bins outside the triangle conditions
                                                 if not self._check_bin(bin1p,bin2p,binLp,even=False): continue
@@ -381,8 +383,9 @@ class TSpec():
                                                 
                                                 # Update indices
                                                 index2e += 1
-                                                if bin2p!=bin4p: index2o += 1 # no equal bins!
-
+                                                if ((bin1p==bin3p)*(bin2p==bin4p))!=1:
+                                                    index2o += 1 # no equal bins!
+                                                
                                                 ## Compute permutation factors
                                                 pref1  = (bin1==bin1p)*(bin2==bin2p)*(bin3==bin3p)*(bin4==bin4p)*(binL==binLp)
                                                 pref1 += (bin1==bin2p)*(bin2==bin1p)*(bin3==bin3p)*(bin4==bin4p)*(binL==binLp)
@@ -427,44 +430,44 @@ class TSpec():
                                                                 for l4 in range(self.min_l+bin4*self.dl,self.min_l+(bin4+1)*self.dl):
                                                                     if L<abs(l3-l4) or L>l3+l4: continue
                                                                     
-                                                                    print(l1,l2,l3,l4,L)
-
-                                                                    # Continue if wrong-parity, or in b2 = b4 bin and odd
-                                                                    if (-1)**(l1+l2+l3+l4)==-1 and bin2==bin4: continue
+                                                                    # Continue if wrong-parity, or in [b1=b3, b2=b4] bin and odd
+                                                                    if (-1)**(l1+l2+l3+l4)==-1 and ((bin1==bin3)*(bin2==bin4))==1: continue
+                                                                    if (-1)**(l1+l2+l3+l4)==-1 and ((bin1p==bin3p)*(bin2p==bin4p))==1: continue
                                                                     if (-1)**(l1+l2+l3+l4)==1 and parity=='odd': continue
                                                                     if (-1)**(l1+l2+l3+l4)==-1 and parity=='even': continue
                                                                     
                                                                     # second 3j symbols with spin (-1, -1, 2)
                                                                     tj34 = self.threej(l3,l4,L)
-
+                                                                    
                                                                     ## add first permutation
                                                                     if pref1!=0 and tj12*tj34!=0:
+
                                                                         # assemble relevant contribution
                                                                         if (-1)**(l1+l2+l3+l4)==-1:
                                                                             value_odd += -pref1*tj12**2*tj34**2*(2.*l1+1.)*(2.*l2+1.)*(2.*l3+1.)*(2.*l4+1.)*(2.*L+1.)/(4.*np.pi)**2/self.base.Cl[l1]/self.base.Cl[l2]/self.base.Cl[l3]/self.base.Cl[l4]
                                                                         else:
                                                                             value_even += pref1*tj12**2*tj34**2*(2.*l1+1.)*(2.*l2+1.)*(2.*l3+1.)*(2.*l4+1.)*(2.*L+1.)/(4.*np.pi)**2/self.base.Cl[l1]/self.base.Cl[l2]/self.base.Cl[l3]/self.base.Cl[l4]
 
-                                                                        # Iterate over L' for off-diagonal terms
-                                                                        for Lp in range(self.min_l+binLp*self.dl,self.min_l+(binLp+1)*self.dl):
-                                                                            tj1324 = self.threej(l1,l3,Lp)*self.threej(l2,l4,Lp)
-                                                                            tj1432 = self.threej(l1,l4,Lp)*self.threej(l3,l2,Lp)
+                                                                    # Iterate over L' for off-diagonal terms
+                                                                    for Lp in range(self.min_l+binLp*self.dl,self.min_l+(binLp+1)*self.dl):
+                                                                        tj1324 = self.threej(l1,l3,Lp)*self.threej(l2,l4,Lp)
+                                                                        tj1432 = self.threej(l1,l4,Lp)*self.threej(l3,l2,Lp)
 
-                                                                            ## add second permutation
-                                                                            if pref2!=0 and tj1324!=0: 
-                                                                                if (-1)**(l1+l2+l3+l4)==-1:
-                                                                                    value_odd += -pref2*(-1.)**(l2+l3)*tj12*tj34*tj1324*self.sixj(L,l1,l2,Lp,l4,l3)*(2.*l1+1.)*(2.*l2+1.)*(2.*l3+1.)*(2.*l4+1.)*(2.*L+1.)*(2.*Lp+1.)/(4.*np.pi)**2./self.base.Cl[l1]/self.base.Cl[l2]/self.base.Cl[l3]/self.base.Cl[l4]
-                                                                                else:
-                                                                                    value_even += pref2*(-1.)**(l2+l3)*tj12*tj34*tj1324*self.sixj(L,l1,l2,Lp,l4,l3)*(2.*l1+1.)*(2.*l2+1.)*(2.*l3+1.)*(2.*l4+1.)*(2.*L+1.)*(2.*Lp+1.)/(4.*np.pi)**2./self.base.Cl[l1]/self.base.Cl[l2]/self.base.Cl[l3]/self.base.Cl[l4]
+                                                                        ## add second permutation
+                                                                        if pref2!=0 and tj1324!=0: 
+                                                                            if (-1)**(l1+l2+l3+l4)==-1:
+                                                                                value_odd += -pref2*(-1.)**(l2+l3)*tj12*tj34*tj1324*self.sixj(L,l1,l2,Lp,l4,l3)*(2.*l1+1.)*(2.*l2+1.)*(2.*l3+1.)*(2.*l4+1.)*(2.*L+1.)*(2.*Lp+1.)/(4.*np.pi)**2./self.base.Cl[l1]/self.base.Cl[l2]/self.base.Cl[l3]/self.base.Cl[l4]
+                                                                            else:
+                                                                                value_even += pref2*(-1.)**(l2+l3)*tj12*tj34*tj1324*self.sixj(L,l1,l2,Lp,l4,l3)*(2.*l1+1.)*(2.*l2+1.)*(2.*l3+1.)*(2.*l4+1.)*(2.*L+1.)*(2.*Lp+1.)/(4.*np.pi)**2./self.base.Cl[l1]/self.base.Cl[l2]/self.base.Cl[l3]/self.base.Cl[l4]
 
-                                                                            ## add third permutation
-                                                                            if pref3!=0 and tj1432!=0:
-                                                                                if (-1)**(l1+l2+l3+l4)==-1:
-                                                                                    value_odd += -pref3*(-1.)**(L+Lp)*tj12*tj34*tj1432*self.sixj(L,l1,l2,Lp,l3,l4)*(2.*l1+1.)*(2.*l2+1.)*(2.*l3+1.)*(2.*l4+1.)*(2.*L+1.)*(2*Lp+1.)/(4.*np.pi)**2./self.base.Cl[l1]/self.base.Cl[l2]/self.base.Cl[l3]/self.base.Cl[l4]
-                                                                                else:
-                                                                                    value_even += pref3*(-1.)**(L+Lp)*tj12*tj34*tj1432*self.sixj(L,l1,l2,Lp,l3,l4)*(2.*l1+1.)*(2.*l2+1.)*(2.*l3+1.)*(2.*l4+1.)*(2.*L+1.)*(2*Lp+1.)/(4.*np.pi)**2./self.base.Cl[l1]/self.base.Cl[l2]/self.base.Cl[l3]/self.base.Cl[l4]
+                                                                        ## add third permutation
+                                                                        if pref3!=0 and tj1432!=0:
+                                                                            if (-1)**(l1+l2+l3+l4)==-1:
+                                                                                value_odd += -pref3*(-1.)**(L+Lp)*tj12*tj34*tj1432*self.sixj(L,l1,l2,Lp,l3,l4)*(2.*l1+1.)*(2.*l2+1.)*(2.*l3+1.)*(2.*l4+1.)*(2.*L+1.)*(2*Lp+1.)/(4.*np.pi)**2./self.base.Cl[l1]/self.base.Cl[l2]/self.base.Cl[l3]/self.base.Cl[l4]
+                                                                            else:
+                                                                                value_even += pref3*(-1.)**(L+Lp)*tj12*tj34*tj1432*self.sixj(L,l1,l2,Lp,l3,l4)*(2.*l1+1.)*(2.*l2+1.)*(2.*l3+1.)*(2.*l4+1.)*(2.*L+1.)*(2*Lp+1.)/(4.*np.pi)**2./self.base.Cl[l1]/self.base.Cl[l2]/self.base.Cl[l3]/self.base.Cl[l4]
                                                                     
-                                                if parity!='even':
+                                                if parity!='even' and ((bin1==bin3)*(bin2==bin4)!=1) and ((bin1p==bin3p)*(bin2p==bin4p)!=1):
                                                     fish_odd[index1o, index2o] = value_odd
                                                 if parity!='odd':
                                                     fish_even[index1e, index2e] = value_even
@@ -514,23 +517,25 @@ class TSpec():
                 self.inv_fish_ideal_odd = np.linalg.inv(fish_ideal[1])
         
         # Compute Fisher matrices, if not supplied
-        if parity=='even' and not hasattr(self,'inv_fish_ideal'):
+        if (parity!='odd' and not hasattr(self,'inv_fish_ideal_even')) or (parity!='even' and not hasattr(self,'inv_fish_ideal_odd')):
             print("Computing ideal Fisher matrix")
             self.fisher_ideal(parity=parity, verb=verb)
+        else:
+            print("Using precomputed Fisher matrix")
             
         # Compute numerator
         if verb: print("Computing numerator")
-        Bl_num_ideal = self.Tl_numerator_ideal(data, parity=parity, verb=False)
+        Tl_num_ideal = self.Tl_numerator_ideal(data, parity=parity, verb=False)
         
         # Compute full estimator
         if parity=='even':
-            Bl_even = np.matmul(self.inv_fish_ideal_even,Bl_num_ideal)
-            return Bl_even
+            Tl_even = np.matmul(self.inv_fish_ideal_even,Tl_num_ideal)
+            return Tl_even
         elif parity=='odd':
-            Bl_odd = np.matmul(self.inv_fish_ideal_odd,Bl_num_ideal)
-            return Bl_odd
+            Tl_odd = np.matmul(self.inv_fish_ideal_odd,Tl_num_ideal)
+            return Tl_odd
         else:
-            Bl_even = np.matmul(self.inv_fish_ideal_even,Bl_num_ideal[0])
-            Bl_odd = np.matmul(self.inv_fish_ideal_odd,Bl_num_ideal[1])
-            return Bl_even, Bl_odd
+            Tl_even = np.matmul(self.inv_fish_ideal_even,Tl_num_ideal[0])
+            Tl_odd = np.matmul(self.inv_fish_ideal_odd,Tl_num_ideal[1])
+            return Tl_even, Tl_odd
     

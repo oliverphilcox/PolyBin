@@ -1,7 +1,6 @@
 ### Code for ideal and unwindowed binned polyspectrum estimation on the full-sky. Author: Oliver Philcox (2022)
 ## This module contains the bispectrum estimation code
 
-import healpy
 import numpy as np
 import multiprocessing as mp
 import tqdm
@@ -402,6 +401,8 @@ class BSpec():
         if not hasattr(self,'inv_fish_ideal'):
             print("Computing ideal Fisher matrix")
             self.fisher_ideal()
+        else:
+            print("Using precomputed Fisher matrix")
             
         # Compute numerator
         Bl_num_ideal = self.Bl_numerator_ideal(data)
