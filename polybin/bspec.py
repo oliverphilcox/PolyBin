@@ -95,7 +95,7 @@ class BSpec():
         
     def load_sims(self, sims, verb=False):
         """
-        Load in Monte Carlo simulations used in the linear term of the bispectrum generator. 
+        Load in Monte Carlo simulations used in the linear term of the bispectrum estimator. 
         These can alternatively be generated with a fiducial spectrum using the generate_sims script.
         """
         
@@ -114,7 +114,6 @@ class BSpec():
             Q_b_alpha_map = [self.base.to_map(Wh_alpha_lm*self.ell_bins[bin1]) for bin1 in range(self.Nl)]
             
             self.Q_b_alpha_maps.append(Q_b_alpha_map)
-          
         
     def generate_sims(self, N_it, Cl_input=[], b_input=None, add_B=False, remove_mean=True, verb=False):
         """
@@ -146,7 +145,6 @@ class BSpec():
             Q_b_alpha_map = [self.base.to_map(Wh_alpha_lm*self.ell_bins[bin1]) for bin1 in range(self.Nl)]
             
             self.Q_b_alpha_maps.append(Q_b_alpha_map)
-              
     
     ### OPTIMAL ESTIMATOR
     def Bl_numerator(self, data, include_linear_term=True, verb=False):
@@ -208,7 +206,9 @@ class BSpec():
         return b_num
     
     def fisher_contribution(self, seed, verb=False):
-        """This computes the contribution to the Fisher matrix from a single GRF simulation, created internally."""
+        """
+        This computes the contribution to the Fisher matrix from a single GRF simulation, created internally.
+        """
         
         # Initialize output
         fish = np.zeros((self.N_b,self.N_b))
@@ -270,7 +270,12 @@ class BSpec():
         return fish
     
     def fisher(self, N_it, N_cpus=1):
-        """Compute the Fisher matrix using N_it realizations. If N_cpus > 1, this parallelizes the operations."""
+        """
+        Compute the Fisher matrix using N_it realizations. If N_cpus > 1, this parallelizes the operations (though HEALPix is already parallelized so the speed-up is not particularly significant).
+        
+        For high-dimensional problems, it is usually preferred to split the computation across a cluster with MPI, calling fisher_contribution for each instead of this function.
+        
+        """
 
         # Initialize output
         fish = np.zeros((self.N_b,self.N_b))
@@ -295,7 +300,7 @@ class BSpec():
     
     def Bl_unwindowed(self, data, fish=[], include_linear_term=True, verb=False):
         """
-        Compute the idealized bispectrum estimator, including normalization, if not supplied or already computed.
+        Compute the unwindowed bispectrum estimator, using a precomputed or supplied Fisher matrix.
         
         We can optionally switch off the linear term.
         """

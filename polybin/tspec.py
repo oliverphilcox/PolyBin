@@ -182,6 +182,258 @@ class TSpec():
         
         return A_minus_lm.conj()
 
+    def load_sims(self, sims, verb=False):
+        """
+        Load in Monte Carlo simulations used in the two- and zero-field terms of the trispectrum estimator. 
+        These can alternatively be generated with a fiducial spectrum using the generate_sims script.
+        """
+
+        raise Exception("need to compute t0 here!")
+        raise NotImplementedError
+
+    def generate_sims(self, N_it, Cl_input=[], verb=False):
+        """
+        Generate Monte Carlo simulations used in the two- and zero-field terms of the trispectrum generator. 
+        These are pure GRFs. By default, they are generated with the input survey mask.
+        We create N_it such simulations and store the relevant transformations into memory.
+        
+        We can alternatively load custom simulations using the load_sims script.
+        """
+
+        raise NotImplementedError
+
+    ### OPTIMAL ESTIMATOR
+    def Tl_numerator(self, data, parity='even', include_disconnected_term=True, verb=False):
+        """
+        Compute the numerator of the unwindowed trispectrum estimator.
+
+        The `parity' parameter can be 'even', 'odd' or 'both'. This specifies what parity trispectra to compute.
+
+        We can also optionally switch off the disconnected terms.
+        """
+        
+        # Check type
+        if parity not in ['even','odd','both']:
+            raise Exception("Parity parameter not set correctly!")
+        
+        # Compute symmetry factors, if not already present
+        if not hasattr(self, 'sym_factor_even') and parity!='odd':
+            self._compute_even_symmetry_factor()
+        if not hasattr(self, 'sym_factor_odd') and parity!='even':
+            self._compute_odd_symmetry_factor()
+        
+        # Check if simulations have been supplied
+        if not hasattr(self, 'A_ad_lms') and include_disconnected_term:
+            raise Exception("Need to generate or specify bias simulations!")
+        
+        # Normalize data by S^-1 and transform to harmonic space
+        Wh_data_lm = self.base.to_lm(self.mask*self.applySinv(data))
+        
+        # Compute H and H-bar maps
+        if verb: print("Computing H^+- maps")
+        H_map = [self._compute_H(self.ell_bins[bin1]*Wh_data_lm) for bin1 in range(self.Nl)]
+        Hbar_map = [self._compute_H(self.phase_factor*self.ell_bins[bin1]*Wh_data_lm) for bin1 in range(self.Nl)]
+
+        # Define array of A maps (restricting to bin2 <= bin1, by symmetry)
+        if verb: print("Computing A maps")
+        Alm = [[self._compute_Alm(H_map,bin1,bin2) for bin2 in range(bin1+1)] for bin1 in range(self.Nl)]
+        Abar_lm = [[self.phase_factor*self._compute_Alm(Hbar_map,bin1,bin2) for bin2 in range(bin1+1)] for bin1 in range(self.Nl)]
+        
+        # Even parity estimator
+        if parity=='even' or parity=='both':
+            
+            # Define arrays
+            t4_even_num = np.zeros(self.N_t_even)
+            if not include_disconnected_term:
+                print("No subtraction of even-parity disconnected terms performed!")
+            else:
+                t2_even_num = np.zeros(self.N_t_even, dtype='complex')
+                
+            # iterate over bins with b2>=b1, b4>=b3, b3>=b1 and b4>=b2 if b1=b3
+            if verb: print("Assembling parity-odd trispectrum numerator")
+            for bin1 in range(self.Nl):
+                for bin2 in range(bin1,self.Nl):
+                    for bin3 in range(bin1,self.Nl):
+                        for bin4 in range(bin3,self.Nl):
+                            if bin1==bin3 and bin4<bin2: continue
+             
+                            # Compute summands
+                            summand_t4 = self.m_weight*np.real(Abar_lm[bin2][bin1].conj()*Alm[bin4][bin3] + Alm[bin2][bin1].conj()*Abar_lm[bin4][bin3])
+                
+                            # Compute 2-field term summand
+                            if include_disconnected_term: 
+                                # Sum over 6 permutations and all MC fields
+                                summand_t2 = 0.
+                                for ii in range(self.N_it):
+                                    # first set of fields
+                                    summand_t2 += Abar_lm[bin2][bin1].conj()*self.A_aa_lms[ii][bin4][bin3] + Alm[bin2][bin1].conj()*self.Abar_aa_lms[ii][bin4][bin3]
+                                    summand_t2 += self.Abar_ad_lms[ii][bin1][bin2].conj()*self.A_ad_lms[ii][bin3][bin4] + self.A_ad_lms[ii][bin1][bin2].conj()*self.Abar_ad_lms[ii][bin3][bin4]
+                                    summand_t2 += self.Abar_ad_lms[ii][bin1][bin2].conj()*self.A_ad_lms[ii][bin4][bin3] + self.A_ad_lms[ii][bin1][bin2].conj()*self.Abar_ad_lms[ii][bin4][bin3]
+                                    summand_t2 += self.Abar_ad_lms[ii][bin2][bin1].conj()*self.A_ad_lms[ii][bin3][bin4] + self.A_ad_lms[ii][bin2][bin1].conj()*self.Abar_ad_lms[ii][bin3][bin4]
+                                    summand_t2 += self.Abar_ad_lms[ii][bin2][bin1].conj()*self.A_ad_lms[ii][bin4][bin3] + self.A_ad_lms[ii][bin2][bin1].conj()*self.Abar_ad_lms[ii][bin4][bin3]
+                                    summand_t2 += self.Abar_aa_lms[ii][bin2][bin1].conj()*Alm[bin4][bin3] + self.A_aa_lms[ii][bin2][bin1].conj()*Abar_lm[bin4][bin3]
+                                    # second set of fields
+                                    summand_t2 += Abar_lm[bin2][bin1].conj()*self.A_bb_lms[ii][bin4][bin3] + Alm[bin2][bin1].conj()*self.Abar_bb_lms[ii][bin4][bin3]
+                                    summand_t2 += self.Abar_bd_lms[ii][bin1][bin2].conj()*self.A_bd_lms[ii][bin3][bin4] + self.A_bd_lms[ii][bin1][bin2].conj()*self.Abar_bd_lms[ii][bin3][bin4]
+                                    summand_t2 += self.Abar_bd_lms[ii][bin1][bin2].conj()*self.A_bd_lms[ii][bin4][bin3] + self.A_bd_lms[ii][bin1][bin2].conj()*self.Abar_bd_lms[ii][bin4][bin3]
+                                    summand_t2 += self.Abar_bd_lms[ii][bin2][bin1].conj()*self.A_bd_lms[ii][bin3][bin4] + self.A_bd_lms[ii][bin2][bin1].conj()*self.Abar_bd_lms[ii][bin3][bin4]
+                                    summand_t2 += self.Abar_bd_lms[ii][bin2][bin1].conj()*self.A_bd_lms[ii][bin4][bin3] + self.A_bd_lms[ii][bin2][bin1].conj()*self.Abar_bd_lms[ii][bin4][bin3]
+                                    summand_t2 += self.Abar_bb_lms[ii][bin2][bin1].conj()*Alm[bin4][bin3] + self.A_bb_lms[ii][bin2][bin1].conj()*Abar_lm[bin4][bin3]
+                                summand_t2 = self.m_weight*np.real(summand_t2)/self.N_it/2.
+
+                            # Iterate over L bins
+                            for binL in range(Nl):
+                                # skip bins outside the triangle conditions
+                                if not self._check_bin(bin1,bin2,binL,even=False): continue
+                                if not self._check_bin(bin3,bin4,binL,even=False): continue
+
+                                # Compute estimator numerator
+                                t4_even_num[index] = 1./2.*np.sum(summand_t4*ell_bins[binL])
+                                if include_disconnected_term:
+                                    t2_even_num[index] = -1./2.*np.sum(summand_t2*ell_bins[binL])
+
+                                index += 1
+
+            if include_disconnected_term:
+                t_even_num = (t4_even_num+t2_even_num+self.t0_even_num)/self.sym_factor_even
+            else:
+                t_even_num = t4_even_num/self.sym_factor_even
+
+        # Odd parity estimator
+        if parity=='odd' or parity=='both':
+            
+            # Define arrays
+            t4_odd_num = np.zeros(self.N_t_odd, dtype='complex')
+            if not include_disconnected_term:
+                print("No subtraction of odd-parity disconnected terms performed!")
+            else:
+                t2_odd_num = np.zeros(self.N_t_odd, dtype='complex')
+                        
+            # iterate over bins with b2>=b1, b4>=b3, b3>=b1 and b4>b2 if b1=b3
+            if verb: print("Assembling parity-odd trispectrum numerator")
+            for bin1 in range(self.Nl):
+                for bin2 in range(bin1,self.Nl):
+                    for bin3 in range(bin1,self.Nl):
+                        for bin4 in range(bin3,self.Nl):
+                            if bin1==bin3 and bin4<=bin2: continue
+                            
+                            # Compute 4-field term summand
+                            summand_t4 = self.m_weight*np.imag(Abar_lm[bin2][bin1].conj()*Alm[bin4][bin3] - Alm[bin2][bin1].conj()*Abar_lm[bin4][bin3])
+
+                            # Compute 2-field term summand
+                            if include_disconnected_term: 
+                                # Sum over 6 permutations and all MC fields
+                                summand_t2 = 0.
+                                for ii in range(self.N_it):
+                                    # first set of fields
+                                    summand_t2 += Abar_lm[bin2][bin1].conj()*self.A_aa_lms[ii][bin4][bin3] - Alm[bin2][bin1].conj()*self.Abar_aa_lms[ii][bin4][bin3]
+                                    summand_t2 += self.Abar_ad_lms[ii][bin1][bin2].conj()*self.A_ad_lms[ii][bin3][bin4] - self.A_ad_lms[ii][bin1][bin2].conj()*self.Abar_ad_lms[ii][bin3][bin4]
+                                    summand_t2 += self.Abar_ad_lms[ii][bin1][bin2].conj()*self.A_ad_lms[ii][bin4][bin3] - self.A_ad_lms[ii][bin1][bin2].conj()*self.Abar_ad_lms[ii][bin4][bin3]
+                                    summand_t2 += self.Abar_ad_lms[ii][bin2][bin1].conj()*self.A_ad_lms[ii][bin3][bin4] - self.A_ad_lms[ii][bin2][bin1].conj()*self.Abar_ad_lms[ii][bin3][bin4]
+                                    summand_t2 += self.Abar_ad_lms[ii][bin2][bin1].conj()*self.A_ad_lms[ii][bin4][bin3] - self.A_ad_lms[ii][bin2][bin1].conj()*self.Abar_ad_lms[ii][bin4][bin3]
+                                    summand_t2 += self.Abar_aa_lms[ii][bin2][bin1].conj()*Alm[bin4][bin3] - self.A_aa_lms[ii][bin2][bin1].conj()*Abar_lm[bin4][bin3]
+                                    # second set of fields
+                                    summand_t2 += Abar_lm[bin2][bin1].conj()*self.A_bb_lms[ii][bin4][bin3] - Alm[bin2][bin1].conj()*self.Abar_bb_lms[ii][bin4][bin3]
+                                    summand_t2 += self.Abar_bd_lms[ii][bin1][bin2].conj()*self.A_bd_lms[ii][bin3][bin4] - self.A_bd_lms[ii][bin1][bin2].conj()*self.Abar_bd_lms[ii][bin3][bin4]
+                                    summand_t2 += self.Abar_bd_lms[ii][bin1][bin2].conj()*self.A_bd_lms[ii][bin4][bin3] - self.A_bd_lms[ii][bin1][bin2].conj()*self.Abar_bd_lms[ii][bin4][bin3]
+                                    summand_t2 += self.Abar_bd_lms[ii][bin2][bin1].conj()*self.A_bd_lms[ii][bin3][bin4] - self.A_bd_lms[ii][bin2][bin1].conj()*self.Abar_bd_lms[ii][bin3][bin4]
+                                    summand_t2 += self.Abar_bd_lms[ii][bin2][bin1].conj()*self.A_bd_lms[ii][bin4][bin3] - self.A_bd_lms[ii][bin2][bin1].conj()*self.Abar_bd_lms[ii][bin4][bin3]
+                                    summand_t2 += self.Abar_bb_lms[ii][bin2][bin1].conj()*Alm[bin4][bin3] - self.A_bb_lms[ii][bin2][bin1].conj()*Abar_lm[bin4][bin3]
+                                summand_t2 = self.m_weight*np.imag(summand_t2)/self.N_it/2.
+
+                            # Iterate over L bins
+                            for binL in range(self.Nl):
+                                # skip bins outside the triangle conditions
+                                if not self._check_bin(bin1,bin2,binL,even=False): continue
+                                if not self._check_bin(bin3,bin4,binL,even=False): continue
+                                
+                                # Compute estimator numerator
+                                t4_odd_num[index]=-1.0j/2.*np.sum(summand_t4*ell_bins[binL])
+
+                                if include_disconnected_term:
+                                    t2_odd_num[index] = 1.0j/2.*np.sum(summand_t2*ell_bins[binL])
+
+                                index += 1
+
+            if include_disconnected_term:
+                t_odd_num = (t4_odd_num+t2_odd_num+self.t0_odd_num)/self.sym_factor_odd
+            else:
+                t_odd_num = t4_odd_num/self.sym_factor_odd
+
+        if parity=='even':
+            return t_even_num
+        elif parity=='odd':
+            return t_odd_num
+        else:
+            return t_even_num, t_odd_num
+    
+    def fisher_contribution(self, seed, verb=False):
+        """
+        This computes the contribution to the Fisher matrix from a single GRF simulation, created internally.
+        """
+        
+        raise NotImplementedError
+
+    def fisher(self, N_it, N_cpus=1):
+        """
+        Compute the Fisher matrix using N_it realizations. If N_cpus > 1, this parallelizes the operations (though HEALPix is already parallelized so the speed-up is not particularly significant).
+
+        For high-dimensional problems, it is usually preferred to split the computation across a cluster with MPI, calling fisher_contribution for each instead of this function.
+        """
+
+        raise NotImplementedError
+
+    def Tl_unwindowed(self, data, fish=[], parity='even', include_disconnected_term=True, verb=False):
+        """
+        Compute the unwindowed trispectrum estimator.
+        
+        The `parity' parameter can be 'even', 'odd' or 'both'. This specifies what parity trispectra to compute.
+
+        The code either uses pre-computed Fisher matrices or reads them in on input. 
+        Note that for parity='both', the Fisher matrix should contain *both* even and odd trispectra, stacked (unlike for ideal estimators).
+        
+        We can also optionally switch off the disconnected terms.
+        """
+        
+        # Check type
+        if parity not in ['even','odd','both']:
+            raise Exception("Parity parameter not set correctly!")
+        
+        # Read in Fisher matrices, if supplied
+        if len(fish)!=0:
+            if parity=='even':
+                self.fish_even = fish
+                self.inv_fish_even = np.linalg.inv(fish)
+            elif parity=='odd':
+                self.fish_odd = fish
+                self.inv_fish_odd = np.linalg.inv(fish)
+            elif parity=='both':
+                self.fish_both = fish
+                self.inv_fish_both = np.linalg.inv(fish)
+        
+        if parity=='even' and not hasattr(self,'inv_fish_even'):
+            raise Exception("Need to compute even-parity Fisher matrix first!")
+        if parity=='odd' and not hasattr(self,'inv_fish_odd'):
+            raise Exception("Need to compute odd-parity Fisher matrix first!")
+        if parity=='both' and not hasattr(self,'inv_fish_both'):
+            raise Exception("Need to compute both-parity Fisher matrix first!")
+        
+        # Compute numerator
+        Tl_num = self.Tl_numerator(data, parity=parity, include_disconnected_term=include_disconnected_term, verb=verb)
+        
+        # Apply Fisher matrix and output
+        if parity=='even':
+            Tl_even = np.matmul(self.inv_fish_even,Tl_num)
+            return Tl_even
+        if parity=='odd':
+            Tl_odd = np.matmul(self.inv_fish_odd,Tl_num)
+            return Tl_odd
+        if parity=='both':
+            Tl_both = np.matmul(self.inv_fish_both,np.concatenate([Tl_num[0],Tl_num[1]])
+            Tl_even = Tl_both[:self.N_t_even]
+            Tl_odd = Tl_both[self.N_t_even:]
+            return Tl_even, Tl_odd
+
     ### IDEAL ESTIMATOR
     def Tl_numerator_ideal(self, data, parity='even', verb=False):
         """
