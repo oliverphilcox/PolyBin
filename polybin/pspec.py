@@ -50,7 +50,7 @@ class PSpec():
 
         return Cl_num
     
-    def fisher_contribution(self, seed):
+    def compute_fisher_contribution(self, seed):
         """This computes the contribution to the Fisher matrix from a single GRF simulation, created internally."""
         
         # Initialize output
@@ -76,7 +76,7 @@ class PSpec():
         
         return fish
     
-    def fisher(self, N_it, N_cpus=1):
+    def compute_fisher(self, N_it, N_cpus=1):
         """Compute the Fisher matrix using N_it realizations. If N_cpus > 1, this parallelizes the operations."""
 
         # Initialize output
@@ -84,12 +84,12 @@ class PSpec():
 
         global _iterable
         def _iterable(seed):
-            return self.fisher_contribution(seed)
+            return self.compute_fisher_contribution(seed)
         
         if N_cpus==1:
             for seed in range(N_it):
                 if seed%5==0: print("Computing Fisher contribution %d of %d"%(seed+1,N_it))
-                fish += self.fisher_contribution(seed)/N_it
+                fish += self.compute_fisher_contribution(seed)/N_it
         else:
             p = mp.Pool(N_cpus)
             print("Computing Fisher contribution from %d Monte Carlo simulations on %d threads"%(N_it, N_cpus))
@@ -130,7 +130,7 @@ class PSpec():
 
         return Cl_num
                 
-    def fisher_ideal(self):
+    def compute_fisher_ideal(self):
         """This computes the idealized Fisher matrix for the power spectrum."""
         
         # Compute normalization
@@ -150,7 +150,7 @@ class PSpec():
         
         if not hasattr(self,'inv_fish_ideal'):
             print("Computing ideal Fisher matrix")
-            self.fisher_ideal()
+            self.compute_fisher_ideal()
             
         # Compute numerator
         Cl_num_ideal = self.Cl_numerator_ideal(data)

@@ -205,7 +205,7 @@ class BSpec():
         b_num = b3_num + b1_num
         return b_num
     
-    def fisher_contribution(self, seed, verb=False):
+    def compute_fisher_contribution(self, seed, verb=False):
         """
         This computes the contribution to the Fisher matrix from a single GRF simulation, created internally.
         """
@@ -269,11 +269,11 @@ class BSpec():
 
         return fish
     
-    def fisher(self, N_it, N_cpus=1):
+    def compute_fisher(self, N_it, N_cpus=1):
         """
         Compute the Fisher matrix using N_it realizations. If N_cpus > 1, this parallelizes the operations (though HEALPix is already parallelized so the speed-up is not particularly significant).
         
-        For high-dimensional problems, it is usually preferred to split the computation across a cluster with MPI, calling fisher_contribution for each instead of this function.
+        For high-dimensional problems, it is usually preferred to split the computation across a cluster with MPI, calling compute_fisher_contribution for each instead of this function.
         
         """
 
@@ -282,12 +282,12 @@ class BSpec():
 
         global _iterable
         def _iterable(seed):
-            return self.fisher_contribution(seed)
+            return self.compute_fisher_contribution(seed)
         
         if N_cpus==1:
             for seed in range(N_it):
                 if seed%5==0: print("Computing Fisher contribution %d of %d"%(seed+1,N_it))
-                fish += self.fisher_contribution(seed)/N_it
+                fish += self.compute_fisher_contribution(seed)/N_it
         else:
             p = mp.Pool(N_cpus)
             print("Computing Fisher contribution from %d Monte Carlo simulations on %d threads"%(N_it, N_cpus))
@@ -355,7 +355,7 @@ class BSpec():
         b_num_ideal *= 1./self.sym_factor/np.mean(self.mask**3)
         return b_num_ideal
 
-    def fisher_ideal(self, verb=False):
+    def compute_fisher_ideal(self, verb=False):
         """This computes the idealized Fisher matrix for the bispectrum."""
         
         # Compute symmetry factor, if not already present
@@ -405,7 +405,7 @@ class BSpec():
         
         if not hasattr(self,'inv_fish_ideal'):
             print("Computing ideal Fisher matrix")
-            self.fisher_ideal()
+            self.compute_fisher_ideal()
         else:
             print("Using precomputed Fisher matrix")
             
