@@ -13,12 +13,19 @@ class PolyBin():
     
     Inputs:
     - Nside: HEALPix Nside
-    - Cl: Fiducial power spectrum. This is used for creating synthetic maps for the optimal estimators, and, optionally, generating GRFs to test on."""
-    def __init__(self, Nside, Cl):
+    - Cl: Fiducial power spectrum (including beam and noise). This is used for creating synthetic maps for the optimal estimators, and, optionally, generating GRFs to test on.
+    - beam: Beam present in the signal maps. This will be set to unity if unspecified, else deconvolved out the signal.
+    
+    """
+    def __init__(self, Nside, Cl, beam=[]):
         
         # Load attributes
         self.Nside = Nside
         self.Cl = Cl
+        if len(beam)==0:
+            self.beam = 1.+0.*Cl
+        else:
+            self.beam = beam
         
         # Derived parameters
         self.Npix = 12*Nside**2
@@ -26,23 +33,31 @@ class PolyBin():
         self.lmax = 3*self.Nside-1
         self.l_arr,self.m_arr = healpy.Alm.getlm(self.lmax)
         
-        # Apply Cl to grid
+        # Apply Cl and beam to grid (including beam and noise)
         ls = np.arange(self.lmax+1)
         self.Cl_lm = InterpolatedUnivariateSpline(ls, self.Cl)(self.l_arr)
+        self.beam_lm = InterpolatedUnivariateSpline(ls, self.beam)(self.l_arr)
+
+        if (self.Cl==0).sum()>0:
+            print("## Caution: Zeros detected in input Cl - this may cause problems for inversion!")
+        if (self.beam==0).sum()>0:
+            print("## Caution: Zeros detected in input beam - this may cause problems for inversion!")
         for i in range(self.lmax+1):
             if self.Cl[i]==0:
                 self.Cl_lm[self.l_arr==i] = 0.
+            if self.beam[i]==0:
+                self.beam_lm[self.l_arr==i] = 0.
                 
         # Define 3j calculation
         wig.wig_table_init(self.lmax*2,9)
         wig.wig_temp_init(self.lmax*2)
         self.tj0 = lambda l1,l2,l3: wig.wig3jj(2*l1,2*l2,2*l3,0,0,0)
 
-    # Basic HEALPix utilities
+    # Basic harmonic transform functions
     def to_lm(self, input_map):
         """Convert from map-space to harmonic-space"""
         return healpy.map2alm(input_map,pol=False)
-
+        
     def to_map(self, input_lm):
         """Convert from harmonic-space to map-space"""
         return healpy.alm2map(input_lm,self.Nside,pol=False)

@@ -2,3 +2,16 @@
 .ipynb_checkpoints
 notebooks/*.ipynb
 notebooks
+testing
+testing/*
+*.txt
+*.csv
+*.png
+planck
+planck/*
+models/*
+models
+nano *.ipynb
+*.txt'
+*.jl
+*.npz

@@ -26,6 +26,7 @@ class PSpec():
         self.min_l = min_l
         self.dl = dl
         self.Nl = Nl
+        self.beam_lm = self.base.beam_lm
         
         if min_l+Nl*dl>base.lmax:
             raise Exception("Maximum l is larger than HEALPix resolution!")
@@ -38,6 +39,14 @@ class PSpec():
         # Define m weights (for complex conjugates)
         self.m_weight = (1.+1.*(self.base.m_arr>0.))
  
+    def get_ells(self):
+        """
+        Return a list of the central ell values for each power spectrum bin.
+        """
+        # Iterate over bins
+        ls = [self.min_l+(bin1+0.5)*self.dl-0.5 for bin1 in range(self.Nl)]
+        return ls
+
     ### OPTIMAL ESTIMATOR
     def Cl_numerator(self, data):
         """Compute the numerator of the unwindowed power spectrum estimator.
@@ -45,8 +54,8 @@ class PSpec():
         # Apply W * S^-1 to data and transform to harmonic space
         Wh_data_lm = self.base.to_lm(self.mask*self.applySinv(data))
 
-        # Compute numerator
-        Cl_num = 0.5*np.real(np.sum(self.m_weight*Wh_data_lm*np.conj(Wh_data_lm)*self.all_ell_bins,axis=1))
+        # Compute numerator (including beam)
+        Cl_num = 0.5*np.real(np.sum(self.m_weight*Wh_data_lm*np.conj(Wh_data_lm)*self.all_ell_bins*self.beam_lm**2,axis=1))
 
         return Cl_num
     
@@ -66,14 +75,15 @@ class PSpec():
         # Compute Q_b fields, including S^-1 weighting
         WSinv_u_lm = self.base.to_lm(self.mask*Sinv_u)
         WUinv_u_lm = self.base.to_lm(self.mask*Uinv_u)
-        Sinv_Q_b_Sinv_u = [self.applySinv(self.base.to_map(WSinv_u_lm*self.ell_bins[bin1])*self.mask) for bin1 in range(self.Nl)]
-        Q_b_Uinv_u = [self.base.to_map(WUinv_u_lm*self.ell_bins[bin1])*self.mask for bin1 in range(self.Nl)]
+        Sinv_Q_b_Uinv_u = [self.applySinv(self.base.to_map(WUinv_u_lm*self.ell_bins[bin1]*self.beam_lm**2)*self.mask) for bin1 in range(self.Nl)]
+        Q_b_Sinv_u = [self.base.to_map(WSinv_u_lm*self.ell_bins[bin1]*self.beam_lm**2)*self.mask for bin1 in range(self.Nl)]
 
         # Compute the Fisher matrix
         for bin1 in range(self.Nl):
             for bin2 in range(self.Nl):
-                fish[bin1,bin2] = 0.5*np.real(self.base.A_pix*np.sum(Q_b_Uinv_u[bin1]*Sinv_Q_b_Sinv_u[bin2]))
+                fish[bin1,bin2] = 0.5*np.real(self.base.A_pix*np.sum(Q_b_Sinv_u[bin1]*Sinv_Q_b_Uinv_u[bin2]))
         
+        # Return matrix
         return fish
     
     def compute_fisher(self, N_it, N_cpus=1):
@@ -126,7 +136,7 @@ class PSpec():
         Cinv_data_lm = self.base.safe_divide(self.base.to_lm(data),self.base.Cl_lm)
 
         # Compute numerator
-        Cl_num = 0.5*np.real(np.sum(self.m_weight*Cinv_data_lm*np.conj(Cinv_data_lm)*self.all_ell_bins,axis=1))/np.mean(self.mask**2)
+        Cl_num = 0.5*np.real(np.sum(self.m_weight*Cinv_data_lm*np.conj(Cinv_data_lm)*self.all_ell_bins*self.beam_lm**2,axis=1))/np.mean(self.mask**2)
 
         return Cl_num
                 
@@ -134,7 +144,7 @@ class PSpec():
         """This computes the idealized Fisher matrix for the power spectrum."""
         
         # Compute normalization
-        fish_diag = 0.5*np.sum(self.base.safe_divide(self.m_weight,self.base.Cl_lm**2)*self.all_ell_bins,axis=1)
+        fish_diag = 0.5*np.sum(self.base.safe_divide(self.m_weight,self.base.Cl_lm**2)*self.all_ell_bins*self.beam_lm**4,axis=1)
         fish = np.diag(fish_diag)
         self.fish_ideal = fish
         self.inv_fish_ideal = np.diag(1./fish_diag)

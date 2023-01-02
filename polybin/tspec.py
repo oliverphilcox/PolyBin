@@ -8,17 +8,23 @@ from scipy.interpolate import InterpolatedUnivariateSpline
 import pywigxjpf as wig
 
 class TSpec():
-    """Trispectrum estimation class. This takes the binning strategy as input and a base class. 
+    """
+    Trispectrum estimation class. This takes the binning strategy as input and a base class. 
     We also feed in a function that applies the S^-1 operator in real space.
+
+    Note that we can additionally compute squeezed tetrahedra by setting Nl_squeeze > Nl, giving a different lmax for short and long sides.
+    We allow sides l2, l4 and L to have higher ell in this set-up (noting that l2 > l1, l4 > l3, and that {l1,l2,L} and {l3,l4,L} obey triangle conditions.)
     
     Inputs:
     - base: PolyBin class
     - mask: HEALPix mask to deconvolve
     - applySinv: function which returns S^-1 applied to a given input map
     - min_l, dl, Nl: binning parameters
+    - Nl_squeeze: number of squeezed ell bins (optional)
+    - NL: number of L bins (optional)
     - include_partial_triangles: whether to include triangles (in l1,l2,L or l3,l4,L) whose centers don't satisfy the triangle conditions. (Default: False)
     """
-    def __init__(self, base, mask, applySinv, min_l, dl, Nl, include_partial_triangles=False):
+    def __init__(self, base, mask, applySinv, min_l, dl, Nl, Nl_squeeze=None, NL=None, include_partial_triangles=False):
         # Read in attributes
         self.base = base
         self.mask = mask
@@ -26,14 +32,30 @@ class TSpec():
         self.min_l = min_l
         self.dl = dl
         self.Nl = Nl
+        if Nl_squeeze!=None:
+            assert Nl_squeeze>=Nl, "Squeezed Nl must be at least as large as Nl!"
+            self.Nl_squeeze = Nl_squeeze
+        else:
+            self.Nl_squeeze = Nl
+        if NL!=None:
+            assert NL<=self.Nl_squeeze, "NL shouldn't be larger than squeezed Nl!"
+            self.NL = NL
+        else:
+            self.NL = self.Nl_squeeze
+        self.beam = self.base.beam
+        self.beam_lm = self.base.beam_lm
         self.include_partial_triangles = include_partial_triangles
         
         if min_l+Nl*dl>base.lmax:
             raise Exception("Maximum l is larger than HEALPix resolution!")
         print("Binning: %d bins in [%d, %d]"%(Nl,min_l,min_l+Nl*dl))
+        if self.Nl_squeeze!=self.Nl:
+            print("Squeezed binning: %d bins in [%d, %d]"%(Nl_squeeze,min_l,min_l+Nl_squeeze*dl))
+        if self.NL!=self.Nl_squeeze:
+            print("L binning: %d bins in [%d, %d]"%(NL,min_l,min_l+NL*dl)) 
         
         # Define l filters
-        self.ell_bins = [(self.base.l_arr>=self.min_l+self.dl*bin1)&(self.base.l_arr<self.min_l+self.dl*(bin1+1)) for bin1 in range(self.Nl)]
+        self.ell_bins = [(self.base.l_arr>=self.min_l+self.dl*bin1)&(self.base.l_arr<self.min_l+self.dl*(bin1+1)) for bin1 in range(self.Nl_squeeze)]
         self.phase_factor = (-1.)**self.base.l_arr
 
         # Define m weights (for complex conjugates)
@@ -48,7 +70,8 @@ class TSpec():
         self.sixj = lambda l1,l2,l3,l4,l5,l6: wig.wig6jj(2*l1,2*l2,2*l3,2*l4,2*l5,2*l6)
 
     def _check_bin(self, bin1, bin2, bin3, even=False):
-        """Return one if modes in the bin satisfy the triangle conditions, or zero else.
+        """
+        Return one if modes in the bin satisfy the triangle conditions, or zero else.
 
         If even=true, we enforce that the sum of the three ells must be even.
 
@@ -70,10 +93,9 @@ class TSpec():
             else:
                 return 0
         else:
-            l1 = self.min_l+(bin1+0.5)*self.dl
-            l2 = self.min_l+(bin2+0.5)*self.dl
-            l3 = self.min_l+(bin3+0.5)*self.dl
-            if even and ((-1)**(l1+l2+l3)==-1): return 0 
+            l1 = self.min_l+(bin1+0.5)*self.dl-0.5
+            l2 = self.min_l+(bin2+0.5)*self.dl-0.5
+            l3 = self.min_l+(bin3+0.5)*self.dl-0.5
             if l3<abs(l1-l2) or l3>l1+l2:
                 return 0
             else:
@@ -87,13 +109,13 @@ class TSpec():
 
         # iterate over bins with b2>=b1, b4>=b3, b3>=b1 and b4>=b2 if b1=b3
         for bin1 in range(self.Nl):
-            for bin2 in range(bin1,self.Nl):
+            for bin2 in range(bin1,self.Nl_squeeze):
                 for bin3 in range(bin1,self.Nl):
-                    for bin4 in range(bin3,self.Nl):
+                    for bin4 in range(bin3,self.Nl_squeeze):
                         if bin1==bin3 and bin4<bin2: continue # note different condition to odd estimator!
                         
                         # Iterate over L bins
-                        for binL in range(self.Nl):
+                        for binL in range(self.NL):
                             # skip bins outside the triangle conditions
                             if not self._check_bin(bin1,bin2,binL,even=False): continue
                             if not self._check_bin(bin3,bin4,binL,even=False): continue
@@ -127,13 +149,13 @@ class TSpec():
 
         # iterate over bins with b2>=b1, b4>=b3, b3>=b1 and b4>b2 if b1=b3
         for bin1 in range(self.Nl):
-            for bin2 in range(bin1,self.Nl):
+            for bin2 in range(bin1,self.Nl_squeeze):
                 for bin3 in range(bin1,self.Nl):
-                    for bin4 in range(bin3,self.Nl):
+                    for bin4 in range(bin3,self.Nl_squeeze):
                         if bin1==bin3 and bin4<=bin2: continue
                         
                         # Iterate over L bins
-                        for binL in range(self.Nl):
+                        for binL in range(self.NL):
                             # skip bins outside the triangle conditions
                             if not self._check_bin(bin1,bin2,binL,even=False): continue
                             if not self._check_bin(bin3,bin4,binL,even=False): continue
@@ -158,6 +180,48 @@ class TSpec():
         # Count number of bins
         self.N_t_odd = len(self.sym_factor_odd)
         print("Using %d odd-parity trispectrum bins"%self.N_t_odd)
+    
+    def get_ells(self):
+        """
+        Return an array with the central l1, l2, l3, l4, L values for each trispectrum bin. 
+        We also give which parity trispectra each bin corresponds to.
+        """
+
+        # Define arrays
+        l1s, l2s, l3s, l4s, Ls = [],[],[],[],[]
+        parities  = []
+
+        # Iterate over bins with b2>=b1, b4>=b3, b3>=b1 and b4>b2 if b1=b3
+        for bin1 in range(self.Nl):
+            l1 = self.min_l+(bin1+0.5)*dl-0.5
+            for bin2 in range(bin1,self.Nl_squeeze):
+                l2 = self.min_l+(bin2+0.5)*self.dl-0.5
+                for bin3 in range(bin1,self.Nl):
+                    l3 = self.min_l+(bin3+0.5)*self.dl-0.5
+                    for bin4 in range(bin3,self.Nl_squeeze):
+                        l4 = self.min_l+(bin4+0.5)*self.dl-0.5
+                        if bin1==bin3 and bin4<bin2: continue
+                        
+                        # Iterate over L bins
+                        for binL in range(self.NL):
+                            L = self.min_l+(binL+0.5)*self.dl-0.5
+
+                            # skip bins outside the triangle conditions
+                            if not self._check_bin(bin1,bin2,binL,even=False): continue
+                            if not self._check_bin(bin3,bin4,binL,even=False): continue
+
+                            if bin1==bin3 and bin4==bin2:
+                                parities.append('even')
+                            else:
+                                parities.append('both')
+
+                            # Add to output array
+                            l1s.append(l1)
+                            l2s.append(l2)
+                            l3s.append(l3)
+                            l4s.append(l4)
+                            Ls.append(L)
+        return l1s,l2s,l3s,l4s,Ls,parities
 
     def _compute_H(self, h_lm):
         """
@@ -205,9 +269,9 @@ class TSpec():
             # Iterate over bins with b2>=b1, b4>=b3, b3>=b1 and b4>=b2 if b1=b3
             index = 0
             for bin1 in range(self.Nl):
-                for bin2 in range(bin1,self.Nl):
+                for bin2 in range(bin1,self.Nl_squeeze):
                     for bin3 in range(bin1,self.Nl):
-                        for bin4 in range(bin3,self.Nl):
+                        for bin4 in range(bin3,self.Nl_squeeze):
                             if bin1==bin3 and bin4<bin2: continue
              
                             # Compute summands, summing over permutations and MC fields
@@ -222,7 +286,7 @@ class TSpec():
                             summand_t0 = self.m_weight*np.real(summand_t0)/self.N_it
                             
                             # Iterate over L bins
-                            for binL in range(self.Nl):
+                            for binL in range(self.NL):
                                 # skip bins outside the triangle conditions
                                 if not self._check_bin(bin1,bin2,binL,even=False): continue
                                 if not self._check_bin(bin3,bin4,binL,even=False): continue
@@ -234,14 +298,14 @@ class TSpec():
         if parity=='odd' or parity=='both':
 
             # Define arrays 
-            self.t0_odd_num = np.zeros(self.N_t_odd, dtype='complex')
+            self.t0_odd_num = np.zeros(self.N_t_odd)
 
             # Iterate over bins with b2>=b1, b4>=b3, b3>=b1 and b4>b2 if b1=b3
             index = 0
             for bin1 in range(self.Nl):
-                for bin2 in range(bin1,self.Nl):
+                for bin2 in range(bin1,self.Nl_squeeze):
                     for bin3 in range(bin1,self.Nl):
-                        for bin4 in range(bin3,self.Nl):
+                        for bin4 in range(bin3,self.Nl_squeeze):
                             if bin1==bin3 and bin4<=bin2: continue
              
                             # Compute summands, summing over permutations and MC fields
@@ -256,13 +320,13 @@ class TSpec():
                             summand_t0 = self.m_weight*np.imag(summand_t0)/self.N_it
                             
                             # Iterate over L bins
-                            for binL in range(self.Nl):
+                            for binL in range(self.NL):
                                 # skip bins outside the triangle conditions
                                 if not self._check_bin(bin1,bin2,binL,even=False): continue
                                 if not self._check_bin(bin3,bin4,binL,even=False): continue
 
                                 # Compute estimator numerator
-                                self.t0_odd_num[index] = -1.0j/4.*np.sum(summand_t0*self.ell_bins[binL])
+                                self.t0_odd_num[index] = -1./4.*np.sum(summand_t0*self.ell_bins[binL])
                                 index += 1
 
     def _compute_A_map_pm2(self, H_maps, Hbar_maps, H_maps2=[], Hbar_maps2=[]):
@@ -274,21 +338,21 @@ class TSpec():
         
         ## Cross-spectra
         if len(H_maps2)!=0 and len(Hbar_maps2)!=0:
-            # Compute A[u,v](L,M) maps
-            A_uv_lm = [[self._compute_Alm(H_maps,bin1,bin2,H_maps2) for bin2 in range(self.Nl)] for bin1 in range(self.Nl)]
-            Abar_uv_lm = [[self.phase_factor*self._compute_Alm(Hbar_maps,bin1,bin2,Hbar_maps2) for bin2 in range(self.Nl)] for bin1 in range(self.Nl)]
+            # Compute A[u,v](L,M) maps (note that these are evaluated for bin1<bin2 and bin1>bin2!)
+            A_uv_lm = [[self._compute_Alm(H_maps,bin1,bin2,H_maps2) for bin2 in range(self.Nl_squeeze)] for bin1 in range(self.Nl_squeeze)]
+            Abar_uv_lm = [[self.phase_factor*self._compute_Alm(Hbar_maps,bin1,bin2,Hbar_maps2) for bin2 in range(self.Nl_squeeze)] for bin1 in range(self.Nl_squeeze)]
 
             # Convert to map-space
-            all_A_pm2 = [[[self.base.to_map_spin(A_uv_lm[bin3][bin4].conj()*self.ell_bins[binL],Abar_uv_lm[bin3][bin4].conj()*self.ell_bins[binL],2) for binL in range(self.Nl)] for bin4 in range(self.Nl)] for bin3 in range(self.Nl)]
+            all_A_pm2 = [[[self.base.to_map_spin(A_uv_lm[bin3][bin4].conj()*self.ell_bins[binL],Abar_uv_lm[bin3][bin4].conj()*self.ell_bins[binL],2) for binL in range(self.Nl_squeeze)] for bin4 in range(self.Nl_squeeze)] for bin3 in range(self.Nl_squeeze)]
 
         ## Auto-spectra
         else:
             # Compute A[a,b](L,M) maps
-            A_uu_lm = [[self._compute_Alm(H_maps,bin1,bin2) for bin2 in range(bin1+1)] for bin1 in range(self.Nl)]
-            Abar_uu_lm = [[self.phase_factor*self._compute_Alm(Hbar_maps,bin1,bin2) for bin2 in range(bin1+1)] for bin1 in range(self.Nl)]
+            A_uu_lm = [[self._compute_Alm(H_maps,bin1,bin2) for bin2 in range(bin1+1)] for bin1 in range(self.Nl_squeeze)]
+            Abar_uu_lm = [[self.phase_factor*self._compute_Alm(Hbar_maps,bin1,bin2) for bin2 in range(bin1+1)] for bin1 in range(self.Nl_squeeze)]
 
             # Convert to map-space
-            all_A_pm2 = [[[self.base.to_map_spin(A_uu_lm[bin4][bin3].conj()*self.ell_bins[binL],Abar_uu_lm[bin4][bin3].conj()*self.ell_bins[binL],2) for binL in range(self.Nl)] for bin4 in range(bin3,self.Nl)] for bin3 in range(self.Nl)]
+            all_A_pm2 = [[[self.base.to_map_spin(A_uu_lm[bin4][bin3].conj()*self.ell_bins[binL],Abar_uu_lm[bin4][bin3].conj()*self.ell_bins[binL],2) for binL in range(self.NL)] for bin4 in range(bin3,self.Nl_squeeze)] for bin3 in range(self.Nl_squeeze)]
 
         return all_A_pm2
 
@@ -302,13 +366,14 @@ class TSpec():
         """
 
         self.N_it = len(sims)
-        print("Using %d Monte Carlo simulations"%self.N_it)
+        print("Using %d pairs of Monte Carlo simulations"%self.N_it)
         
         # Define lists
         self.A_aa_lms, self.Abar_aa_lms = [],[]
         self.A_bb_lms, self.Abar_bb_lms = [],[]
         self.A_ab_lms, self.Abar_ab_lms = [],[]
         self.H_a_maps, self.H_b_maps = [],[]
+        self.Hbar_a_maps, self.Hbar_b_maps = [],[]
 
         for ii in range(self.N_it):
             if ii%5==0 and verb: print("Processing bias simulation %d of %d"%(ii+1,self.N_it))
@@ -318,26 +383,28 @@ class TSpec():
             Wh_beta_lm = self.base.to_lm(self.mask*self.applySinv(sims[ii][1]))
             
             # Compute H_alpha maps
-            H_alpha_map = [self._compute_H(self.ell_bins[bin1]*Wh_alpha_lm) for bin1 in range(self.Nl)]
-            Hbar_alpha_map = [self._compute_H(self.phase_factor*self.ell_bins[bin1]*Wh_alpha_lm) for bin1 in range(self.Nl)]
-            H_beta_map = [self._compute_H(self.ell_bins[bin1]*Wh_beta_lm) for bin1 in range(self.Nl)]
-            Hbar_beta_map = [self._compute_H(self.phase_factor*self.ell_bins[bin1]*Wh_beta_lm) for bin1 in range(self.Nl)]
+            H_alpha_map = [self._compute_H(self.ell_bins[bin1]*self.beam_lm*Wh_alpha_lm) for bin1 in range(self.Nl_squeeze)]
+            Hbar_alpha_map = [self._compute_H(self.phase_factor*self.ell_bins[bin1]*self.beam_lm*Wh_alpha_lm) for bin1 in range(self.Nl_squeeze)]
+            H_beta_map = [self._compute_H(self.ell_bins[bin1]*self.beam_lm*Wh_beta_lm) for bin1 in range(self.Nl_squeeze)]
+            Hbar_beta_map = [self._compute_H(self.phase_factor*self.ell_bins[bin1]*self.beam_lm*Wh_beta_lm) for bin1 in range(self.Nl_squeeze)]
             
             # Compute A[alpha,alpha](b1,b2) maps with bin2>=bin1
-            A_aa_lm = [[self._compute_Alm(H_alpha_map,bin1,bin2) for bin2 in range(bin1+1)] for bin1 in range(self.Nl)]
-            Abar_aa_lm = [[self.phase_factor*self._compute_Alm(Hbar_alpha_map,bin1,bin2) for bin2 in range(bin1+1)] for bin1 in range(self.Nl)]
+            A_aa_lm = [[self._compute_Alm(H_alpha_map,bin1,bin2) for bin2 in range(bin1+1)] for bin1 in range(self.Nl_squeeze)]
+            Abar_aa_lm = [[self.phase_factor*self._compute_Alm(Hbar_alpha_map,bin1,bin2) for bin2 in range(bin1+1)] for bin1 in range(self.Nl_squeeze)]
             
             # Compute A[beta,beta](b1,b2) maps with bin2>=bin1
-            A_bb_lm = [[self._compute_Alm(H_beta_map,bin1,bin2) for bin2 in range(bin1+1)] for bin1 in range(self.Nl)]
-            Abar_bb_lm = [[self.phase_factor*self._compute_Alm(Hbar_beta_map,bin1,bin2) for bin2 in range(bin1+1)] for bin1 in range(self.Nl)]
+            A_bb_lm = [[self._compute_Alm(H_beta_map,bin1,bin2) for bin2 in range(bin1+1)] for bin1 in range(self.Nl_squeeze)]
+            Abar_bb_lm = [[self.phase_factor*self._compute_Alm(Hbar_beta_map,bin1,bin2) for bin2 in range(bin1+1)] for bin1 in range(self.Nl_squeeze)]
             
             # Compute A[alpha,beta](b1,b2) maps for all possible bins
-            A_ab_lm = [[self._compute_Alm(H_alpha_map,bin1,bin2,H_beta_map) for bin2 in range(self.Nl)] for bin1 in range(self.Nl)]
-            Abar_ab_lm = [[self.phase_factor*self._compute_Alm(Hbar_alpha_map,bin1,bin2,Hbar_beta_map) for bin2 in range(self.Nl)] for bin1 in range(self.Nl)]
+            A_ab_lm = [[self._compute_Alm(H_alpha_map,bin1,bin2,H_beta_map) for bin2 in range(self.Nl_squeeze)] for bin1 in range(self.Nl_squeeze)]
+            Abar_ab_lm = [[self.phase_factor*self._compute_Alm(Hbar_alpha_map,bin1,bin2,Hbar_beta_map) for bin2 in range(self.Nl_squeeze)] for bin1 in range(self.Nl_squeeze)]
 
             # Add to arrays
             self.H_a_maps.append(H_alpha_map)
             self.H_b_maps.append(H_beta_map)
+            self.Hbar_a_maps.append(Hbar_alpha_map)
+            self.Hbar_b_maps.append(Hbar_beta_map)
             self.A_aa_lms.append(A_aa_lm)
             self.Abar_aa_lms.append(Abar_aa_lm)
             self.A_bb_lms.append(A_bb_lm)
@@ -355,7 +422,7 @@ class TSpec():
         """
 
         self.N_it = N_it
-        print("Using %d Monte Carlo simulations"%self.N_it)
+        print("Using %d pairs of Monte Carlo simulations"%self.N_it)
         
         # Define input power spectrum (with noise)
         if len(Cl_input)==0:
@@ -381,22 +448,22 @@ class TSpec():
             Wh_beta_lm = self.base.to_lm(self.mask*self.applySinv(raw_beta*self.mask))
     
             # Compute H_alpha maps
-            H_alpha_map = [self._compute_H(self.ell_bins[bin1]*Wh_alpha_lm) for bin1 in range(self.Nl)]
-            Hbar_alpha_map = [self._compute_H(self.phase_factor*self.ell_bins[bin1]*Wh_alpha_lm) for bin1 in range(self.Nl)]
-            H_beta_map = [self._compute_H(self.ell_bins[bin1]*Wh_beta_lm) for bin1 in range(self.Nl)]
-            Hbar_beta_map = [self._compute_H(self.phase_factor*self.ell_bins[bin1]*Wh_beta_lm) for bin1 in range(self.Nl)]
+            H_alpha_map = [self._compute_H(self.ell_bins[bin1]*self.beam_lm*Wh_alpha_lm) for bin1 in range(self.Nl_squeeze)]
+            Hbar_alpha_map = [self._compute_H(self.phase_factor*self.ell_bins[bin1]*self.beam_lm*Wh_alpha_lm) for bin1 in range(self.Nl_squeeze)]
+            H_beta_map = [self._compute_H(self.ell_bins[bin1]*self.beam_lm*Wh_beta_lm) for bin1 in range(self.Nl_squeeze)]
+            Hbar_beta_map = [self._compute_H(self.phase_factor*self.ell_bins[bin1]*self.beam_lm*Wh_beta_lm) for bin1 in range(self.Nl_squeeze)]
             
             # Compute A[alpha,alpha](b1,b2) maps with bin2>=bin1
-            A_aa_lm = [[self._compute_Alm(H_alpha_map,bin1,bin2) for bin2 in range(bin1+1)] for bin1 in range(self.Nl)]
-            Abar_aa_lm = [[self.phase_factor*self._compute_Alm(Hbar_alpha_map,bin1,bin2) for bin2 in range(bin1+1)] for bin1 in range(self.Nl)]
+            A_aa_lm = [[self._compute_Alm(H_alpha_map,bin1,bin2) for bin2 in range(bin1+1)] for bin1 in range(self.Nl_squeeze)]
+            Abar_aa_lm = [[self.phase_factor*self._compute_Alm(Hbar_alpha_map,bin1,bin2) for bin2 in range(bin1+1)] for bin1 in range(self.Nl_squeeze)]
             
             # Compute A[beta,beta](b1,b2) maps with bin2>=bin1
-            A_bb_lm = [[self._compute_Alm(H_beta_map,bin1,bin2) for bin2 in range(bin1+1)] for bin1 in range(self.Nl)]
-            Abar_bb_lm = [[self.phase_factor*self._compute_Alm(Hbar_beta_map,bin1,bin2) for bin2 in range(bin1+1)] for bin1 in range(self.Nl)]
+            A_bb_lm = [[self._compute_Alm(H_beta_map,bin1,bin2) for bin2 in range(bin1+1)] for bin1 in range(self.Nl_squeeze)]
+            Abar_bb_lm = [[self.phase_factor*self._compute_Alm(Hbar_beta_map,bin1,bin2) for bin2 in range(bin1+1)] for bin1 in range(self.Nl_squeeze)]
             
             # Compute A[alpha,beta](b1,b2) maps for all possible bins
-            A_ab_lm = [[self._compute_Alm(H_alpha_map,bin1,bin2,H_beta_map) for bin2 in range(self.Nl)] for bin1 in range(self.Nl)]
-            Abar_ab_lm = [[self.phase_factor*self._compute_Alm(Hbar_alpha_map,bin1,bin2,Hbar_beta_map) for bin2 in range(self.Nl)] for bin1 in range(self.Nl)]
+            A_ab_lm = [[self._compute_Alm(H_alpha_map,bin1,bin2,H_beta_map) for bin2 in range(self.Nl_squeeze)] for bin1 in range(self.Nl_squeeze)]
+            Abar_ab_lm = [[self.phase_factor*self._compute_Alm(Hbar_alpha_map,bin1,bin2,Hbar_beta_map) for bin2 in range(self.Nl_squeeze)] for bin1 in range(self.Nl_squeeze)]
 
             # Add to arrays
             self.H_a_maps.append(H_alpha_map)
@@ -416,6 +483,8 @@ class TSpec():
         Compute the numerator of the unwindowed trispectrum estimator.
 
         The `parity' parameter can be 'even', 'odd' or 'both'. This specifies what parity trispectra to compute.
+
+        Note that we return the imaginary part of the odd-parity trispectrum.
 
         We can also optionally switch off the disconnected terms.
         """
@@ -447,23 +516,23 @@ class TSpec():
         
         # Compute H and H-bar maps
         if verb: print("Computing H^+- maps")
-        H_map = [self._compute_H(self.ell_bins[bin1]*Wh_data_lm) for bin1 in range(self.Nl)]
-        Hbar_map = [self._compute_H(self.phase_factor*self.ell_bins[bin1]*Wh_data_lm) for bin1 in range(self.Nl)]
+        H_map = [self._compute_H(self.ell_bins[bin1]*self.beam_lm*Wh_data_lm) for bin1 in range(self.Nl_squeeze)]
+        Hbar_map = [self._compute_H(self.phase_factor*self.ell_bins[bin1]*self.beam_lm*Wh_data_lm) for bin1 in range(self.Nl_squeeze)]
 
         # Define array of A maps (restricting to bin2 <= bin1, by symmetry)
         if verb: print("Computing A maps")
-        Alm = [[self._compute_Alm(H_map,bin1,bin2) for bin2 in range(bin1+1)] for bin1 in range(self.Nl)]
-        Abar_lm = [[self.phase_factor*self._compute_Alm(Hbar_map,bin1,bin2) for bin2 in range(bin1+1)] for bin1 in range(self.Nl)]
+        Alm = [[self._compute_Alm(H_map,bin1,bin2) for bin2 in range(bin1+1)] for bin1 in range(self.Nl_squeeze)]
+        Abar_lm = [[self.phase_factor*self._compute_Alm(Hbar_map,bin1,bin2) for bin2 in range(bin1+1)] for bin1 in range(self.Nl_squeeze)]
         
         # Compute cross-spectra of MC simulations and data
         if include_disconnected_term:
             if verb: print("Computing A maps for cross-spectra")
             
             # Compute all A[alpha, d] and A[beta, d] for all bins
-            A_ad_lms = [[[self._compute_Alm(self.H_a_maps[ii],bin1,bin2,H_map) for bin2 in range(self.Nl)] for bin1 in range(self.Nl)] for ii in range(self.N_it)]
-            Abar_ad_lms = [[[self.phase_factor*self._compute_Alm(self.Hbar_a_maps[ii],bin1,bin2,Hbar_map) for bin2 in range(self.Nl)] for bin1 in range(self.Nl)] for ii in range(self.N_it)]
-            A_bd_lms = [[[self._compute_Alm(self.H_b_maps[ii],bin1,bin2,H_map) for bin2 in range(self.Nl)] for bin1 in range(self.Nl)] for ii in range(self.N_it)]
-            Abar_bd_lms = [[[self.phase_factor*self._compute_Alm(self.Hbar_b_maps[ii],bin1,bin2,Hbar_map) for bin2 in range(self.Nl)] for bin1 in range(self.Nl)] for ii in range(self.N_it)]
+            A_ad_lms = [[[self._compute_Alm(self.H_a_maps[ii],bin1,bin2,H_map) for bin2 in range(self.Nl_squeeze)] for bin1 in range(self.Nl_squeeze)] for ii in range(self.N_it)]
+            Abar_ad_lms = [[[self.phase_factor*self._compute_Alm(self.Hbar_a_maps[ii],bin1,bin2,Hbar_map) for bin2 in range(self.Nl_squeeze)] for bin1 in range(self.Nl_squeeze)] for ii in range(self.N_it)]
+            A_bd_lms = [[[self._compute_Alm(self.H_b_maps[ii],bin1,bin2,H_map) for bin2 in range(self.Nl_squeeze)] for bin1 in range(self.Nl_squeeze)] for ii in range(self.N_it)]
+            Abar_bd_lms = [[[self.phase_factor*self._compute_Alm(self.Hbar_b_maps[ii],bin1,bin2,Hbar_map) for bin2 in range(self.Nl_squeeze)] for bin1 in range(self.Nl_squeeze)] for ii in range(self.N_it)]
     
         # Even parity estimator
         if parity=='even' or parity=='both':
@@ -479,9 +548,9 @@ class TSpec():
             if verb: print("Assembling parity-even trispectrum numerator")
             index = 0
             for bin1 in range(self.Nl):
-                for bin2 in range(bin1,self.Nl):
+                for bin2 in range(bin1,self.Nl_squeeze):
                     for bin3 in range(bin1,self.Nl):
-                        for bin4 in range(bin3,self.Nl):
+                        for bin4 in range(bin3,self.Nl_squeeze):
                             if bin1==bin3 and bin4<bin2: continue
              
                             # Compute summands
@@ -509,7 +578,7 @@ class TSpec():
                                 summand_t2 = self.m_weight*np.real(summand_t2)/self.N_it/2.
 
                             # Iterate over L bins
-                            for binL in range(self.Nl):
+                            for binL in range(self.NL):
                                 # skip bins outside the triangle conditions
                                 if not self._check_bin(bin1,bin2,binL,even=False): continue
                                 if not self._check_bin(bin3,bin4,binL,even=False): continue
@@ -530,19 +599,19 @@ class TSpec():
         if parity=='odd' or parity=='both':
             
             # Define arrays
-            t4_odd_num = np.zeros(self.N_t_odd, dtype='complex')
+            t4_odd_num = np.zeros(self.N_t_odd)
             if not include_disconnected_term:
                 print("No subtraction of odd-parity disconnected terms performed!")
             else:
-                t2_odd_num = np.zeros(self.N_t_odd, dtype='complex')
+                t2_odd_num = np.zeros(self.N_t_odd)
                         
             # Iterate over bins with b2>=b1, b4>=b3, b3>=b1 and b4>b2 if b1=b3
             if verb: print("Assembling parity-odd trispectrum numerator")
             index = 0
             for bin1 in range(self.Nl):
-                for bin2 in range(bin1,self.Nl):
+                for bin2 in range(bin1,self.Nl_squeeze):
                     for bin3 in range(bin1,self.Nl):
-                        for bin4 in range(bin3,self.Nl):
+                        for bin4 in range(bin3,self.Nl_squeeze):
                             if bin1==bin3 and bin4<=bin2: continue
                             
                             # Compute 4-field term summand
@@ -570,16 +639,16 @@ class TSpec():
                                 summand_t2 = self.m_weight*np.imag(summand_t2)/self.N_it/2.
 
                             # Iterate over L bins
-                            for binL in range(self.Nl):
+                            for binL in range(self.NL):
                                 # skip bins outside the triangle conditions
                                 if not self._check_bin(bin1,bin2,binL,even=False): continue
                                 if not self._check_bin(bin3,bin4,binL,even=False): continue
                                 
                                 # Compute estimator numerator
-                                t4_odd_num[index]=-1.0j/2.*np.sum(summand_t4*self.ell_bins[binL])
+                                t4_odd_num[index]=-1./2.*np.sum(summand_t4*self.ell_bins[binL])
 
                                 if include_disconnected_term:
-                                    t2_odd_num[index] = 1.0j/2.*np.sum(summand_t2*self.ell_bins[binL])
+                                    t2_odd_num[index] = 1./2.*np.sum(summand_t2*self.ell_bins[binL])
 
                                 index += 1
 
@@ -618,7 +687,7 @@ class TSpec():
         if parity=='odd':
             fish_odd = np.zeros((self.N_t_odd,self.N_t_odd))
         if parity=='both':
-            fish_both = np.zeros((self.N_t_even+self.N_t_odd,self.N_t_even+self.N_t_odd),dtype='complex')
+            fish_both = np.zeros((self.N_t_even+self.N_t_odd,self.N_t_even+self.N_t_odd))
         
         # Compute two random realizations with known power spectrum
         if verb: print("\nGenerating data")
@@ -627,7 +696,9 @@ class TSpec():
 
         def compute_all_Q(weighting='U'):
             """
-            Compute all possible Q[x,y,z] maps for a given simulation pair (u1, u2). This applies some weighting: either U^-1 or S^-1.
+            Compute all possible W Q[x,y,z] maps for a given simulation pair (u1, u2). This applies some weighting: either U^-1 or S^-1.
+
+            For U^-1, this returns S^-1 W Q[x,y,z], as required below.
 
             The 'parity' parameter can be 'even', 'odd' or 'both'.
             """
@@ -641,10 +712,10 @@ class TSpec():
             
             # Define H fields
             if verb: print("\nCreating H maps for %s-inverse-weighted fields"%weighting)
-            H_1 = [self._compute_H(WXinv_u1_lm*self.ell_bins[bin1]) for bin1 in range(self.Nl)]
-            H_2 = [self._compute_H(WXinv_u2_lm*self.ell_bins[bin1]) for bin1 in range(self.Nl)]
-            Hbar_1 = [self._compute_H(self.phase_factor*WXinv_u1_lm*self.ell_bins[bin1]) for bin1 in range(self.Nl)]
-            Hbar_2 = [self._compute_H(self.phase_factor*WXinv_u2_lm*self.ell_bins[bin1]) for bin1 in range(self.Nl)]
+            H_1 = [self._compute_H(WXinv_u1_lm*self.ell_bins[bin1]*self.beam_lm) for bin1 in range(self.Nl_squeeze)]
+            H_2 = [self._compute_H(WXinv_u2_lm*self.ell_bins[bin1]*self.beam_lm) for bin1 in range(self.Nl_squeeze)]
+            Hbar_1 = [self._compute_H(self.phase_factor*WXinv_u1_lm*self.ell_bins[bin1]*self.beam_lm) for bin1 in range(self.Nl_squeeze)]
+            Hbar_2 = [self._compute_H(self.phase_factor*WXinv_u2_lm*self.ell_bins[bin1]*self.beam_lm) for bin1 in range(self.Nl_squeeze)]
             
             # Compute A maps
             if verb: print("Computing A[u1,u2] maps for %s-inverse-weighted fields"%weighting)
@@ -660,6 +731,8 @@ class TSpec():
                 The 'fields' parameter gives the relevant symmetries.
 
                 This returns an array containing both even- and odd-parity maps.
+                
+                If using the U^-1 weighting, this also premultiplies by S^-1.
                 """
 
                 if fields=='111':
@@ -698,10 +771,10 @@ class TSpec():
             
             # Compute raw Q[x,y,z] maps
             if verb: print("Computing raw Q maps for %s-inverse-weighted fields"%weighting)
-            Qraw_111 = [[[[compute_Qraw(bin2,bin3,bin4,binL,'111') for binL in range(self.Nl)] for bin4 in range(bin3,self.Nl)] for bin3 in range(self.Nl)] for bin2 in range(self.Nl)]
-            Qraw_112 = [[[[compute_Qraw(bin2,bin3,bin4,binL,'112') for binL in range(self.Nl)] for bin4 in range(self.Nl)] for bin3 in range(self.Nl)] for bin2 in range(self.Nl)]
-            Qraw_122 = [[[[compute_Qraw(bin2,bin3,bin4,binL,'122') for binL in range(self.Nl)] for bin4 in range(self.Nl)] for bin3 in range(self.Nl)] for bin2 in range(self.Nl)]
-            Qraw_222 = [[[[compute_Qraw(bin2,bin3,bin4,binL,'222') for binL in range(self.Nl)] for bin4 in range(bin3,self.Nl)] for bin3 in range(self.Nl)] for bin2 in range(self.Nl)]
+            Qraw_111 = [[[[compute_Qraw(bin2,bin3,bin4,binL,'111') for binL in range(self.NL)] for bin4 in range(bin3,self.Nl_squeeze)] for bin3 in range(self.Nl_squeeze)] for bin2 in range(self.Nl_squeeze)]
+            Qraw_112 = [[[[compute_Qraw(bin2,bin3,bin4,binL,'112') for binL in range(self.NL)] for bin4 in range(self.Nl_squeeze)] for bin3 in range(self.Nl_squeeze)] for bin2 in range(self.Nl_squeeze)]
+            Qraw_122 = [[[[compute_Qraw(bin2,bin3,bin4,binL,'122') for binL in range(self.NL)] for bin4 in range(self.Nl_squeeze)] for bin3 in range(self.Nl_squeeze)] for bin2 in range(self.Nl_squeeze)]
+            Qraw_222 = [[[[compute_Qraw(bin2,bin3,bin4,binL,'222') for binL in range(self.NL)] for bin4 in range(bin3,self.Nl_squeeze)] for bin3 in range(self.Nl_squeeze)] for bin2 in range(self.Nl_squeeze)]
 
             # Compute all Q filters
             if verb: print("Assembling Q filters for %s-inverse-weighted fields"%weighting)
@@ -712,65 +785,87 @@ class TSpec():
             index_odd = 0
             index_even = 0
             for bin1 in range(self.Nl):
-                for bin2 in range(bin1,self.Nl):
+                for bin2 in range(bin1,self.Nl_squeeze):
                     for bin3 in range(bin1,self.Nl):
-                        for bin4 in range(bin3,self.Nl):
+                        for bin4 in range(bin3,self.Nl_squeeze):
                             # always include all bins here for counting!
                             if bin1==bin3 and bin4<bin2: continue
-                            for binL in range(self.Nl):
+                            for binL in range(self.NL):
                                 # skip bins outside the triangle conditions
                                 if not self._check_bin(bin1,bin2,binL,even=False): continue
                                 if not self._check_bin(bin3,bin4,binL,even=False): continue
                                 
                                 # Compute Q[1,1,1] map, including symmetries (noting that 2 alphas are equivalent)
-                                Q111_lm =  2*self.ell_bins[bin1]*Qraw_111[bin2][bin3][bin4-bin3][binL]
-                                Q111_lm += 2*self.ell_bins[bin2]*Qraw_111[bin1][bin3][bin4-bin3][binL]
-                                Q111_lm += 2*self.ell_bins[bin3]*Qraw_111[bin4][bin1][bin2-bin1][binL]
-                                Q111_lm += 2*self.ell_bins[bin4]*Qraw_111[bin3][bin1][bin2-bin1][binL]
+                                Q111_lm =  2*self.ell_bins[bin1]*self.beam_lm*Qraw_111[bin2][bin3][bin4-bin3][binL]
+                                Q111_lm += 2*self.ell_bins[bin2]*self.beam_lm*Qraw_111[bin1][bin3][bin4-bin3][binL]
+                                Q111_lm += 2*self.ell_bins[bin3]*self.beam_lm*Qraw_111[bin4][bin1][bin2-bin1][binL]
+                                Q111_lm += 2*self.ell_bins[bin4]*self.beam_lm*Qraw_111[bin3][bin1][bin2-bin1][binL]
                                 
                                 # Compute Q[1,1,2] map
-                                Q112_lm =  self.ell_bins[bin1]*Qraw_112[bin2][bin3][bin4][binL]
-                                Q112_lm += self.ell_bins[bin2]*Qraw_112[bin1][bin3][bin4][binL]
-                                Q112_lm += self.ell_bins[bin1]*Qraw_112[bin2][bin4][bin3][binL]
-                                Q112_lm += self.ell_bins[bin2]*Qraw_112[bin1][bin4][bin3][binL]
-                                Q112_lm += self.ell_bins[bin3]*Qraw_112[bin4][bin1][bin2][binL]
-                                Q112_lm += self.ell_bins[bin4]*Qraw_112[bin3][bin1][bin2][binL]
-                                Q112_lm += self.ell_bins[bin3]*Qraw_112[bin4][bin2][bin1][binL]
-                                Q112_lm += self.ell_bins[bin4]*Qraw_112[bin3][bin2][bin1][binL]
+                                Q112_lm =  self.ell_bins[bin1]*self.beam_lm*Qraw_112[bin2][bin3][bin4][binL]
+                                Q112_lm += self.ell_bins[bin2]*self.beam_lm*Qraw_112[bin1][bin3][bin4][binL]
+                                Q112_lm += self.ell_bins[bin1]*self.beam_lm*Qraw_112[bin2][bin4][bin3][binL]
+                                Q112_lm += self.ell_bins[bin2]*self.beam_lm*Qraw_112[bin1][bin4][bin3][binL]
+                                Q112_lm += self.ell_bins[bin3]*self.beam_lm*Qraw_112[bin4][bin1][bin2][binL]
+                                Q112_lm += self.ell_bins[bin4]*self.beam_lm*Qraw_112[bin3][bin1][bin2][binL]
+                                Q112_lm += self.ell_bins[bin3]*self.beam_lm*Qraw_112[bin4][bin2][bin1][binL]
+                                Q112_lm += self.ell_bins[bin4]*self.beam_lm*Qraw_112[bin3][bin2][bin1][binL]
                                 
                                 # Compute Q[1,2,2] map
-                                Q122_lm =  2*self.ell_bins[bin1]*Qraw_122[bin2][bin3][bin4][binL]
-                                Q122_lm += 2*self.ell_bins[bin2]*Qraw_122[bin1][bin3][bin4][binL]
-                                Q122_lm += 2*self.ell_bins[bin3]*Qraw_122[bin4][bin1][bin2][binL]
-                                Q122_lm += 2*self.ell_bins[bin4]*Qraw_122[bin3][bin1][bin2][binL]
+                                Q122_lm =  self.ell_bins[bin1]*self.beam_lm*Qraw_122[bin2][bin3][bin4][binL]
+                                Q122_lm += self.ell_bins[bin2]*self.beam_lm*Qraw_122[bin1][bin3][bin4][binL]
+                                Q122_lm += self.ell_bins[bin1]*self.beam_lm*Qraw_122[bin2][bin4][bin3][binL]
+                                Q122_lm += self.ell_bins[bin2]*self.beam_lm*Qraw_122[bin1][bin4][bin3][binL]
+                                Q122_lm += self.ell_bins[bin3]*self.beam_lm*Qraw_122[bin4][bin1][bin2][binL]
+                                Q122_lm += self.ell_bins[bin4]*self.beam_lm*Qraw_122[bin3][bin1][bin2][binL]
+                                Q122_lm += self.ell_bins[bin3]*self.beam_lm*Qraw_122[bin4][bin2][bin1][binL]
+                                Q122_lm += self.ell_bins[bin4]*self.beam_lm*Qraw_122[bin3][bin2][bin1][binL]
                                 
                                 # Compute Q[2,2,2] map
-                                Q222_lm =  2*self.ell_bins[bin1]*Qraw_222[bin2][bin3][bin4-bin3][binL]
-                                Q222_lm += 2*self.ell_bins[bin2]*Qraw_222[bin1][bin3][bin4-bin3][binL]
-                                Q222_lm += 2*self.ell_bins[bin3]*Qraw_222[bin4][bin1][bin2-bin1][binL]
-                                Q222_lm += 2*self.ell_bins[bin4]*Qraw_222[bin3][bin1][bin2-bin1][binL]
+                                Q222_lm =  2*self.ell_bins[bin1]*self.beam_lm*Qraw_222[bin2][bin3][bin4-bin3][binL]
+                                Q222_lm += 2*self.ell_bins[bin2]*self.beam_lm*Qraw_222[bin1][bin3][bin4-bin3][binL]
+                                Q222_lm += 2*self.ell_bins[bin3]*self.beam_lm*Qraw_222[bin4][bin1][bin2-bin1][binL]
+                                Q222_lm += 2*self.ell_bins[bin4]*self.beam_lm*Qraw_222[bin3][bin1][bin2-bin1][binL]
                                 
                                 # Apply mask and convert to real-space
                                 WQ_111_map, WQ_112_map, WQ_122_map, WQ_222_map = [],[],[],[]
 
-                                if parity!='odd':
-                                    # Note the extra i factors here, as Q is an imaginary map
-                                    # We absorb one additional i factor into a -1 multiplying the whole matrix
-                                    WQ_111_map.append(self.mask*self.base.to_map(Q111_lm[0])/(2.*self.sym_factor_even[index_even]))
-                                    WQ_112_map.append(self.mask*self.base.to_map(Q112_lm[0])/(2.*self.sym_factor_even[index_even]))
-                                    WQ_122_map.append(self.mask*self.base.to_map(Q122_lm[0])/(2.*self.sym_factor_even[index_even]))
-                                    WQ_222_map.append(self.mask*self.base.to_map(Q222_lm[0])/(2.*self.sym_factor_even[index_even]))
-                                    index_even += 1
-                                
-                                if parity!='even' and ((bin1==bin3)*(bin2==bin4))!=1:
-                                    # Note the extra i factors here, as Q is an imaginary map
-                                    # We absorb one additional i factor into a -1 multiplying the whole matrix
-                                    WQ_111_map.append(self.mask*self.base.to_map(-1.0j*Q111_lm[1])/(2.*self.sym_factor_odd[index_odd]))
-                                    WQ_112_map.append(self.mask*self.base.to_map(-1.0j*Q112_lm[1])/(2.*self.sym_factor_odd[index_odd]))
-                                    WQ_122_map.append(self.mask*self.base.to_map(-1.0j*Q122_lm[1])/(2.*self.sym_factor_odd[index_odd]))
-                                    WQ_222_map.append(self.mask*self.base.to_map(-1.0j*Q222_lm[1])/(2.*self.sym_factor_odd[index_odd]))
-                                    index_odd += 1
-                                
+                                if weighting=='U':
+                                    # Additionally premultiply by S^-1 here
+                                    if parity!='odd':
+                                        WQ_111_map.append(self.applySinv(self.mask*self.base.to_map(Q111_lm[0])/(2.*self.sym_factor_even[index_even])))
+                                        WQ_112_map.append(self.applySinv(self.mask*self.base.to_map(Q112_lm[0])/(2.*self.sym_factor_even[index_even])))
+                                        WQ_122_map.append(self.applySinv(self.mask*self.base.to_map(Q122_lm[0])/(2.*self.sym_factor_even[index_even])))
+                                        WQ_222_map.append(self.applySinv(self.mask*self.base.to_map(Q222_lm[0])/(2.*self.sym_factor_even[index_even])))
+                                        index_even += 1
+                                    
+                                    if parity!='even' and ((bin1==bin3)*(bin2==bin4))!=1:
+                                        # Note the extra i factors here, as Q is an imaginary map
+                                        # We absorb one additional i factor into a -1 multiplying the whole matrix, which is then removed by the two imaginary parts
+                                        WQ_111_map.append(self.applySinv(self.mask*self.base.to_map(-1.0j*Q111_lm[1])/(2.*self.sym_factor_odd[index_odd])))
+                                        WQ_112_map.append(self.applySinv(self.mask*self.base.to_map(-1.0j*Q112_lm[1])/(2.*self.sym_factor_odd[index_odd])))
+                                        WQ_122_map.append(self.applySinv(self.mask*self.base.to_map(-1.0j*Q122_lm[1])/(2.*self.sym_factor_odd[index_odd])))
+                                        WQ_222_map.append(self.applySinv(self.mask*self.base.to_map(-1.0j*Q222_lm[1])/(2.*self.sym_factor_odd[index_odd])))
+                                        index_odd += 1
+
+                                else:
+                                    # No premultiplication needed!
+                                    if parity!='odd':
+                                        WQ_111_map.append(self.mask*self.base.to_map(Q111_lm[0])/(2.*self.sym_factor_even[index_even]))
+                                        WQ_112_map.append(self.mask*self.base.to_map(Q112_lm[0])/(2.*self.sym_factor_even[index_even]))
+                                        WQ_122_map.append(self.mask*self.base.to_map(Q122_lm[0])/(2.*self.sym_factor_even[index_even]))
+                                        WQ_222_map.append(self.mask*self.base.to_map(Q222_lm[0])/(2.*self.sym_factor_even[index_even]))
+                                        index_even += 1
+                                    
+                                    if parity!='even' and ((bin1==bin3)*(bin2==bin4))!=1:
+                                        # Note the extra i factors here, as Q is an imaginary map
+                                        # We absorb one additional i factor into a -1 multiplying the whole matrix, which is then removed by the two imaginary parts
+                                        WQ_111_map.append(self.mask*self.base.to_map(-1.0j*Q111_lm[1])/(2.*self.sym_factor_odd[index_odd]))
+                                        WQ_112_map.append(self.mask*self.base.to_map(-1.0j*Q112_lm[1])/(2.*self.sym_factor_odd[index_odd]))
+                                        WQ_122_map.append(self.mask*self.base.to_map(-1.0j*Q122_lm[1])/(2.*self.sym_factor_odd[index_odd]))
+                                        WQ_222_map.append(self.mask*self.base.to_map(-1.0j*Q222_lm[1])/(2.*self.sym_factor_odd[index_odd]))
+                                        index_odd += 1
+                                    
                                 # Add to output arrays
                                 WQ_111_maps.append(WQ_111_map)
                                 WQ_112_maps.append(WQ_112_map)
@@ -783,18 +878,18 @@ class TSpec():
         WQ_111_maps_S, WQ_112_maps_S, WQ_122_maps_S, WQ_222_maps_S = compute_all_Q('S')
         
         # Next consider U-weighted leg
-        WQ_111_maps_U, WQ_112_maps_U, WQ_122_maps_U, WQ_222_maps_U = compute_all_Q('U')
+        SiWQ_111_maps_U, SiWQ_112_maps_U, SiWQ_122_maps_U, SiWQ_222_maps_U = compute_all_Q('U')
 
         # Now compute Fisher matrix contribution
         if verb: print("\nComputing Fisher matrix contribution")
         index1o = 0
         index1e = 0
         for bin1 in range(self.Nl):
-            for bin2 in range(bin1,self.Nl):
+            for bin2 in range(bin1,self.Nl_squeeze):
                 for bin3 in range(bin1,self.Nl):
-                    for bin4 in range(bin3,self.Nl):
+                    for bin4 in range(bin3,self.Nl_squeeze):
                         if bin1==bin3 and bin4<bin2: continue
-                        for binL in range(self.Nl):
+                        for binL in range(self.NL):
                             # skip bins outside the triangle conditions
                             if not self._check_bin(bin1,bin2,binL,even=False): continue
                             if not self._check_bin(bin3,bin4,binL,even=False): continue
@@ -808,21 +903,21 @@ class TSpec():
                                 if (index1e)%5==0 and verb: print("On bin %d of %d"%(index1e+1,self.N_t_even))
                             else:
                                 if (index1o)%5==0 and verb: print("On bin %d of %d"%(index1o+1,self.N_t_odd))
-
-                            # Extract Q maps and apply S^-1 
-                            SiWQ_111_S = [self.applySinv(WQ) for WQ in WQ_111_maps_S[index1e]]
-                            SiWQ_112_S = [self.applySinv(WQ) for WQ in WQ_112_maps_S[index1e]]
-                            SiWQ_122_S = [self.applySinv(WQ) for WQ in WQ_122_maps_S[index1e]]
-                            SiWQ_222_S = [self.applySinv(WQ) for WQ in WQ_222_maps_S[index1e]]
                             
+                            # Define relevant S^-1 W Q[U] maps
+                            WQ_111_S = WQ_111_maps_S[index1e]
+                            WQ_112_S = WQ_112_maps_S[index1e]
+                            WQ_122_S = WQ_122_maps_S[index1e]
+                            WQ_222_S = WQ_222_maps_S[index1e]
+
                             # Iterate over second set of bins
                             index2o, index2e = 0, 0
                             for bin1p in range(self.Nl):
-                                for bin2p in range(bin1p,self.Nl):
+                                for bin2p in range(bin1p,self.Nl_squeeze):
                                     for bin3p in range(bin1p,self.Nl):
-                                        for bin4p in range(bin3p,self.Nl):
+                                        for bin4p in range(bin3p,self.Nl_squeeze):
                                             if bin1p==bin3p and bin4p<bin2p: continue
-                                            for binLp in range(self.Nl):
+                                            for binLp in range(self.NL):
                                                 # skip bins outside the triangle conditions
                                                 if not self._check_bin(bin1p,bin2p,binLp,even=False): continue
                                                 if not self._check_bin(bin3p,bin4p,binLp,even=False): continue
@@ -836,44 +931,44 @@ class TSpec():
                                                 
                                                 # Even-Even
                                                 if parity!='odd':
-                                                    fish_summand_ee  =     (SiWQ_111_S[0]*WQ_111_maps_U[index2e][0]+SiWQ_222_S[0]*WQ_222_maps_U[index2e][0])
-                                                    fish_summand_ee +=  9.*(SiWQ_112_S[0]*WQ_112_maps_U[index2e][0]+SiWQ_122_S[0]*WQ_122_maps_U[index2e][0])
-                                                    fish_summand_ee += -6.*(SiWQ_111_S[0]*WQ_122_maps_U[index2e][0]+SiWQ_222_S[0]*WQ_112_maps_U[index2e][0])
-                                                
+                                                    fish_summand_ee  =     (WQ_111_S[0]*SiWQ_111_maps_U[index2e][0]+WQ_222_S[0]*SiWQ_222_maps_U[index2e][0])
+                                                    fish_summand_ee +=  9.*(WQ_112_S[0]*SiWQ_112_maps_U[index2e][0]+WQ_122_S[0]*SiWQ_122_maps_U[index2e][0])
+                                                    fish_summand_ee += -6.*(WQ_111_S[0]*SiWQ_122_maps_U[index2e][0]+WQ_222_S[0]*SiWQ_112_maps_U[index2e][0])
+                                                    
                                                 # Odd-Odd
                                                 if parity!='even' and ((bin1==bin3)*(bin2==bin4))!=1 and ((bin1p==bin3p)*(bin2p==bin4p))!=1:
-                                                    fish_summand_oo  =     (SiWQ_111_S[-1]*WQ_111_maps_U[index2e][-1]+SiWQ_222_S[-1]*WQ_222_maps_U[index2e][-1]) # note we always index with even indices here
-                                                    fish_summand_oo +=  9.*(SiWQ_112_S[-1]*WQ_112_maps_U[index2e][-1]+SiWQ_122_S[-1]*WQ_122_maps_U[index2e][-1])
-                                                    fish_summand_oo += -6.*(SiWQ_111_S[-1]*WQ_122_maps_U[index2e][-1]+SiWQ_222_S[-1]*WQ_112_maps_U[index2e][-1])
-
+                                                    fish_summand_oo  =     (WQ_111_S[-1]*SiWQ_111_maps_U[index2e][-1]+WQ_222_S[-1]*SiWQ_222_maps_U[index2e][-1]) # note we always index with even indices here
+                                                    fish_summand_oo +=  9.*(WQ_112_S[-1]*SiWQ_112_maps_U[index2e][-1]+WQ_122_S[-1]*SiWQ_122_maps_U[index2e][-1])
+                                                    fish_summand_oo += -6.*(WQ_111_S[-1]*SiWQ_122_maps_U[index2e][-1]+WQ_222_S[-1]*SiWQ_112_maps_U[index2e][-1])
+                                                    
                                                 # Even-Odd 
                                                 if parity=='both' and ((bin1p==bin3p)*(bin2p==bin4p))!=1:
-                                                    fish_summand_eo =      (SiWQ_111_S[0]*WQ_111_maps_U[index2e][1]+SiWQ_222_S[0]*WQ_222_maps_U[index2e][1])
-                                                    fish_summand_eo +=  9.*(SiWQ_112_S[0]*WQ_112_maps_U[index2e][1]+SiWQ_122_S[0]*WQ_122_maps_U[index2e][1])
-                                                    fish_summand_eo += -6.*(SiWQ_111_S[0]*WQ_122_maps_U[index2e][1]+SiWQ_222_S[0]*WQ_112_maps_U[index2e][1])
+                                                    fish_summand_eo =      (WQ_111_S[0]*SiWQ_111_maps_U[index2e][1]+WQ_222_S[0]*SiWQ_222_maps_U[index2e][1])
+                                                    fish_summand_eo +=  9.*(WQ_112_S[0]*SiWQ_112_maps_U[index2e][1]+WQ_122_S[0]*SiWQ_122_maps_U[index2e][1])
+                                                    fish_summand_eo += -6.*(WQ_111_S[0]*SiWQ_122_maps_U[index2e][1]+WQ_222_S[0]*SiWQ_112_maps_U[index2e][1])
                                                     
                                                 # Odd-Even
                                                 if parity=='both' and ((bin1==bin3)*(bin2==bin4))!=1:
-                                                    fish_summand_oe =      (SiWQ_111_S[1]*WQ_111_maps_U[index2e][0]+SiWQ_222_S[1]*WQ_222_maps_U[index2e][0])
-                                                    fish_summand_oe +=  9.*(SiWQ_112_S[1]*WQ_112_maps_U[index2e][0]+SiWQ_122_S[1]*WQ_122_maps_U[index2e][0])
-                                                    fish_summand_oe += -6.*(SiWQ_111_S[1]*WQ_122_maps_U[index2e][0]+SiWQ_222_S[1]*WQ_112_maps_U[index2e][0])
-                                                
+                                                    fish_summand_oe =      (WQ_111_S[1]*SiWQ_111_maps_U[index2e][0]+WQ_222_S[1]*SiWQ_222_maps_U[index2e][0])
+                                                    fish_summand_oe +=  9.*(WQ_112_S[1]*SiWQ_112_maps_U[index2e][0]+WQ_122_S[1]*SiWQ_122_maps_U[index2e][0])
+                                                    fish_summand_oe += -6.*(WQ_111_S[1]*SiWQ_122_maps_U[index2e][0]+WQ_222_S[1]*SiWQ_112_maps_U[index2e][0])
+                                                    
                                                 # Assemble relevant matrices
                                                 if parity=='even':
                                                     fish_even[index1e, index2e] = 1./144.*self.base.A_pix*np.sum(fish_summand_ee/8.)
                                                 
                                                 if parity=='odd' and ((bin1==bin3)*(bin2==bin4))!=1 and ((bin1p==bin3p)*(bin2p==bin4p))!=1:
                                                     # note negative sign since Q was originally imaginary
-                                                    fish_odd[index1o, index2o] = -1./144.*self.base.A_pix*np.sum(fish_summand_oo/8.)
+                                                    fish_odd[index1o, index2o] = 1./144.*self.base.A_pix*np.sum(fish_summand_oo/8.)
                                                 
                                                 if parity=='both':
                                                     fish_both[index1e, index2e] = 1./144.*self.base.A_pix*np.sum(fish_summand_ee/8.)
                                                     if ((bin1==bin3)*(bin2==bin4))!=1 and ((bin1p==bin3p)*(bin2p==bin4p))!=1:
-                                                        fish_both[self.N_t_even+index1o, self.N_t_even+index2o] =  -1./144.*self.base.A_pix*np.sum(fish_summand_oo/8.)
+                                                        fish_both[self.N_t_even+index1o, self.N_t_even+index2o] =  1./144.*self.base.A_pix*np.sum(fish_summand_oo/8.)
                                                     if ((bin1==bin3)*(bin2==bin4))!=1:
-                                                        fish_both[self.N_t_even+index1o, index2e] = 1.0j*self.base.A_pix*np.sum(fish_summand_oe/8.)
+                                                        fish_both[self.N_t_even+index1o, index2e] = 1./144.*self.base.A_pix*np.sum(fish_summand_oe/8.)
                                                     if ((bin1p==bin3p)*(bin2p==bin4p))!=1:
-                                                        fish_both[index1e, self.N_t_even+index2o] = 1.0j*self.base.A_pix*np.sum(fish_summand_eo/8.)                                             
+                                                        fish_both[index1e, self.N_t_even+index2o] = 1./144.*self.base.A_pix*np.sum(fish_summand_eo/8.)                                             
                                                 
                                                 # Update indexing
                                                 index2e+=1
@@ -887,11 +982,11 @@ class TSpec():
 
         # Return Fisher contributions
         if parity=='even':
-            return fish_even
+            return 0.5*fish_even
         elif parity=='odd':
-            return fish_odd
+            return 0.5*fish_odd
         else:
-            return fish_both
+            return 0.5*fish_both
         
     def compute_fisher(self, N_it, parity='even', N_cpus=1, verb=False):
         """
@@ -932,7 +1027,7 @@ class TSpec():
                 fish += self.compute_fisher_contribution(seed, parity=parity, verb=verb*(seed==0))/N_it
         else:
             p = mp.Pool(N_cpus)
-            print("Computing Fisher contribution from %d Monte Carlo simulations on %d threads"%(N_it, N_cpus))
+            print("Computing Fisher contribution from %d pairs of Monte Carlo simulations on %d threads"%(N_it, N_cpus))
             all_fish = list(tqdm.tqdm(p.imap_unordered(_iterable,np.arange(N_it)),total=N_it))
             fish = np.sum(all_fish,axis=0)/N_it
         
@@ -962,6 +1057,8 @@ class TSpec():
         The code either uses pre-computed Fisher matrices or reads them in on input. 
         Note that for parity='both', the Fisher matrix should contain *both* even and odd trispectra, stacked (unlike for ideal estimators).
         
+        Note that we return the imaginary part of the odd-parity trispectrum.
+
         We can also optionally switch off the disconnected terms.
         """
         
@@ -1011,6 +1108,8 @@ class TSpec():
 
         The `parity' parameter can be 'even', 'odd' or 'both'. This specifies what parity trispectra to compute.
 
+        Note that we return the imaginary part of the odd-parity trispectrum.
+        
         We can also optionally switch off the disconnected terms. This only affects the parity-even trispectrum.
         """
         # Check type
@@ -1028,13 +1127,13 @@ class TSpec():
         
         # Compute H and H-bar maps
         if verb: print("Computing H^+- maps")
-        H_map = [self._compute_H(self.ell_bins[bin1]*Cinv_data_lm) for bin1 in range(self.Nl)]
-        Hbar_map = [self._compute_H(self.phase_factor*self.ell_bins[bin1]*Cinv_data_lm) for bin1 in range(self.Nl)]
+        H_map = [self._compute_H(self.ell_bins[bin1]*self.beam_lm*Cinv_data_lm) for bin1 in range(self.Nl_squeeze)]
+        Hbar_map = [self._compute_H(self.phase_factor*self.ell_bins[bin1]*self.beam_lm*Cinv_data_lm) for bin1 in range(self.Nl_squeeze)]
 
         # Define array of A maps (restricting to bin2 <= bin1, by symmetry)
         if verb: print("Computing A maps")
-        Alm = [[self._compute_Alm(H_map,bin1,bin2) for bin2 in range(bin1+1)] for bin1 in range(self.Nl)]
-        Abar_lm = [[self.phase_factor*self._compute_Alm(Hbar_map,bin1,bin2) for bin2 in range(bin1+1)] for bin1 in range(self.Nl)]
+        Alm = [[self._compute_Alm(H_map,bin1,bin2) for bin2 in range(bin1+1)] for bin1 in range(self.Nl_squeeze)]
+        Abar_lm = [[self.phase_factor*self._compute_Alm(Hbar_map,bin1,bin2) for bin2 in range(bin1+1)] for bin1 in range(self.Nl_squeeze)]
         
         # Even parity estimator
         if parity=='even' or parity=='both':
@@ -1055,16 +1154,16 @@ class TSpec():
             index = 0
             # iterate over bins with b2>=b1, b4>=b3, b3>=b1 and b4>=b2 if b1=b3
             for bin1 in range(self.Nl):
-                for bin2 in range(bin1,self.Nl):
+                for bin2 in range(bin1,self.Nl_squeeze):
                     for bin3 in range(bin1,self.Nl):
-                        for bin4 in range(bin3,self.Nl):
+                        for bin4 in range(bin3,self.Nl_squeeze):
                             if bin1==bin3 and bin4<bin2: continue # note different condition to odd estimator!
                             
                             # Compute summands
                             summand = self.m_weight*np.real(Abar_lm[bin2][bin1].conj()*Alm[bin4][bin3] + Alm[bin2][bin1].conj()*Abar_lm[bin4][bin3])
                                         
                             # Iterate over L bins
-                            for binL in range(self.Nl):
+                            for binL in range(self.NL):
                                 # skip bins outside the triangle conditions
                                 if not self._check_bin(bin1,bin2,binL,even=False): continue
                                 if not self._check_bin(bin3,bin4,binL,even=False): continue
@@ -1084,12 +1183,12 @@ class TSpec():
                                     for l1 in range(self.min_l+bin1*self.dl,self.min_l+(bin1+1)*self.dl):
 
                                         # Compute sum over l1
-                                        Cinvsq_l1 = np.sum(Cinv_data_lm_sq[self.base.l_arr==l1])
+                                        Cinvsq_l1 = np.sum(Cinv_data_lm_sq[self.base.l_arr==l1]*self.beam[l1]**2)
 
                                         for l2 in range(self.min_l+bin2*self.dl,self.min_l+(bin2+1)*self.dl):
 
                                             # Compute sum over l2
-                                            Cinvsq_l2 = np.sum(Cinv_data_lm_sq[self.base.l_arr==l2])
+                                            Cinvsq_l2 = np.sum(Cinv_data_lm_sq[self.base.l_arr==l2]*self.beam[l2]**2)
                                             
                                             for L in range(self.min_l+binL*self.dl,self.min_l+(binL+1)*self.dl):
                                                 if L<abs(l1-l2) or L>l1+l2: continue
@@ -1098,10 +1197,10 @@ class TSpec():
                                                 tjs = self.threej(l1,l2,L)**2.
 
                                                 # 2-field: (l1, l2) contribution
-                                                value2 += -(2.*L+1.)/(4.*np.pi)*tjs*(-1.)**(l1+l2+L)*((2.*l1+1.)*Cinvsq_l2/self.base.Cl[l1]+(2.*l2+1.)*Cinvsq_l1/self.base.Cl[l2])*kroneckers
+                                                value2 += -(2.*L+1.)/(4.*np.pi)*tjs*(-1.)**(l1+l2+L)*((2.*l1+1.)*Cinvsq_l2*self.beam[l1]**2/self.base.Cl[l1]+(2.*l2+1.)*Cinvsq_l1*self.beam[l2]**2/self.base.Cl[l2])*kroneckers
                                                 
                                                 # 0-field contribution
-                                                value0 += (2.*l1+1.)*(2.*l2+1.)*(2.*L+1.)/(4.*np.pi)*tjs*(-1.)**(l1+l2+L)/self.base.Cl[l1]/self.base.Cl[l2]*kroneckers
+                                                value0 += (2.*l1+1.)*(2.*l2+1.)*(2.*L+1.)/(4.*np.pi)*tjs*(-1.)**(l1+l2+L)*self.beam[l1]**2*self.beam[l2]**2/self.base.Cl[l1]/self.base.Cl[l2]*kroneckers
                                                 
                                     t2_even_num_ideal[index] = value2
                                     t0_even_num_ideal[index] = value0
@@ -1117,28 +1216,28 @@ class TSpec():
         if parity=='odd' or parity=='both':
             
             # Define arrays
-            t_odd_num_ideal = np.zeros(self.N_t_odd, dtype='complex')
+            t_odd_num_ideal = np.zeros(self.N_t_odd)
         
             # iterate over bins with b2>=b1, b4>=b3, b3>=b1 and b4>b2 if b1=b3
             if verb: print("Assembling parity-odd trispectrum numerator")
             index = 0
             for bin1 in range(self.Nl):
-                for bin2 in range(bin1,self.Nl):
+                for bin2 in range(bin1,self.Nl_squeeze):
                     for bin3 in range(bin1,self.Nl):
-                        for bin4 in range(bin3,self.Nl):
+                        for bin4 in range(bin3,self.Nl_squeeze):
                             if bin1==bin3 and bin4<=bin2: continue
                                         
                             # Compute summands
                             summand = self.m_weight*np.imag(Abar_lm[bin2][bin1].conj()*Alm[bin4][bin3] - Alm[bin2][bin1].conj()*Abar_lm[bin4][bin3])
                             
                             # Iterate over L bins
-                            for binL in range(self.Nl):
+                            for binL in range(self.NL):
                                 # skip bins outside the triangle conditions
                                 if not self._check_bin(bin1,bin2,binL,even=False): continue
                                 if not self._check_bin(bin3,bin4,binL,even=False): continue
 
                                 # Compute estimator numerator
-                                t_odd_num_ideal[index] = -1.0j/2.*np.sum(summand*self.ell_bins[binL])
+                                t_odd_num_ideal[index] = -1./2.*np.sum(summand*self.ell_bins[binL])
                                 index += 1
 
             # Normalize
@@ -1151,21 +1250,26 @@ class TSpec():
         else:
             return t_even_num_ideal, t_odd_num_ideal
 
-    def compute_fisher_ideal(self, parity='even', verb=False):
+    def compute_fisher_ideal(self, parity='even', verb=False, N_cpus=1, diagonal=False):
         """
-        This computes the idealized Fisher matrix for the trispectrum.
+        This computes the idealized Fisher matrix for the trispectrum. If N_cpus > 1, this parallelizes the operation.
 
         The `parity' parameter can be 'even', 'odd' or 'both'. This specifies what parity trispectra to compute.
+
+        We can optionally drop any off-diagonal terms in the ideal Fisher matrix and restrict the internal L values. This is not recommended in practice!
         """
         # Check type
         if parity not in ['even','odd','both']:
             raise Exception("Parity parameter not set correctly!")
         
         # Compute symmetry factors, if not already present
-        if not hasattr(self, 'sym_factor_even') and parity!='odd':
+        if not hasattr(self, 'sym_factor_even'): # always need this!
             self._compute_even_symmetry_factor()
         if not hasattr(self, 'sym_factor_odd') and parity!='even':
             self._compute_odd_symmetry_factor()
+
+        if diagonal:
+            print("\n## Caution: dropping off-diagonal terms in the Fisher matrix!\n")
                 
         # Define arrays
         if parity!='even':
@@ -1173,135 +1277,350 @@ class TSpec():
         if parity!='odd':
             fish_even = np.zeros((self.N_t_even, self.N_t_even))
 
-        # Iterate over first set of bins
-        # Note that we use two sets of indices here, since there are a different number of odd and even bins
-        index1e = -1
-        index1o = -1
-        for bin1 in range(self.Nl):
-            for bin2 in range(bin1,self.Nl):
-                for bin3 in range(bin1,self.Nl):
-                    for bin4 in range(bin3,self.Nl):
-                        if bin1==bin3 and bin4<bin2: continue
-                        if bin1==bin3 and bin2==bin4 and parity=='odd': continue
-                        for binL in range(self.Nl):
-                            # skip bins outside the triangle conditions
-                            if not self._check_bin(bin1,bin2,binL,even=False): continue
-                            if not self._check_bin(bin3,bin4,binL,even=False): continue
-                            
-                            # Update indices
-                            index1e += 1
-                            if ((bin1==bin3)*(bin2==bin4))!=1:
-                                index1o += 1 # no equal bins!
-                            
-                            if verb and parity!='odd':
-                                if (index1e+1)%5==0: print("Computing bin %d of %d"%(index1e+1,self.N_t_even))
-                            if verb and parity=='odd':
-                                if (index1o+1)%5==0: print("Computing bin %d of %d"%(index1o+1,self.N_t_odd))
-                                    
-                            # Iterate over second set of bins
-                            index2e = -1
-                            index2o = -1
-                            for bin1p in range(self.Nl):
-                                for bin2p in range(bin1p,self.Nl):
-                                    for bin3p in range(bin1p,self.Nl):
-                                        for bin4p in range(bin3p,self.Nl):
-                                            if bin1p==bin3p and bin4p<bin2p: continue
-                                            if bin1p==bin3p and bin2p==bin4p and parity=='odd': continue
-                                            for binLp in range(self.Nl):
-                                                # skip bins outside the triangle conditions
-                                                if not self._check_bin(bin1p,bin2p,binLp,even=False): continue
-                                                if not self._check_bin(bin3p,bin4p,binLp,even=False): continue
-                                                
-                                                # Update indices
-                                                index2e += 1
-                                                if ((bin1p==bin3p)*(bin2p==bin4p))!=1:
-                                                    index2o += 1 # no equal bins!
-                                                
-                                                ## Compute permutation factors
-                                                pref1  = (bin1==bin1p)*(bin2==bin2p)*(bin3==bin3p)*(bin4==bin4p)*(binL==binLp)
-                                                pref1 += (bin1==bin2p)*(bin2==bin1p)*(bin3==bin3p)*(bin4==bin4p)*(binL==binLp)
-                                                pref1 += (bin1==bin1p)*(bin2==bin2p)*(bin3==bin4p)*(bin4==bin3p)*(binL==binLp)
-                                                pref1 += (bin1==bin2p)*(bin2==bin1p)*(bin3==bin4p)*(bin4==bin3p)*(binL==binLp)
-                                                pref1 += (bin1==bin3p)*(bin2==bin4p)*(bin3==bin1p)*(bin4==bin2p)*(binL==binLp)
-                                                pref1 += (bin1==bin4p)*(bin2==bin3p)*(bin3==bin1p)*(bin4==bin2p)*(binL==binLp)
-                                                pref1 += (bin1==bin3p)*(bin2==bin4p)*(bin3==bin2p)*(bin4==bin1p)*(binL==binLp)
-                                                pref1 += (bin1==bin4p)*(bin2==bin3p)*(bin3==bin2p)*(bin4==bin1p)*(binL==binLp)
-
-                                                pref2  = (bin1==bin1p)*(bin2==bin3p)*(bin3==bin2p)*(bin4==bin4p)
-                                                pref2 += (bin1==bin2p)*(bin2==bin3p)*(bin3==bin1p)*(bin4==bin4p)
-                                                pref2 += (bin1==bin1p)*(bin2==bin4p)*(bin3==bin2p)*(bin4==bin3p)
-                                                pref2 += (bin1==bin2p)*(bin2==bin4p)*(bin3==bin1p)*(bin4==bin3p)
-                                                pref2 += (bin1==bin3p)*(bin2==bin1p)*(bin3==bin4p)*(bin4==bin2p)
-                                                pref2 += (bin1==bin3p)*(bin2==bin2p)*(bin3==bin4p)*(bin4==bin1p)
-                                                pref2 += (bin1==bin4p)*(bin2==bin1p)*(bin3==bin3p)*(bin4==bin2p)
-                                                pref2 += (bin1==bin4p)*(bin2==bin2p)*(bin3==bin3p)*(bin4==bin1p)
-                                                
-                                                pref3  = (bin1==bin1p)*(bin2==bin4p)*(bin3==bin3p)*(bin4==bin2p)
-                                                pref3 += (bin1==bin2p)*(bin2==bin4p)*(bin3==bin3p)*(bin4==bin1p)
-                                                pref3 += (bin1==bin1p)*(bin2==bin3p)*(bin3==bin4p)*(bin4==bin2p)
-                                                pref3 += (bin1==bin2p)*(bin2==bin3p)*(bin3==bin4p)*(bin4==bin1p)
-                                                pref3 += (bin1==bin3p)*(bin2==bin2p)*(bin3==bin1p)*(bin4==bin4p)
-                                                pref3 += (bin1==bin3p)*(bin2==bin1p)*(bin3==bin2p)*(bin4==bin4p)
-                                                pref3 += (bin1==bin4p)*(bin2==bin2p)*(bin3==bin1p)*(bin4==bin3p)
-                                                pref3 += (bin1==bin4p)*(bin2==bin1p)*(bin3==bin2p)*(bin4==bin3p)
-                                                        
-                                                if pref1+pref2+pref3==0: continue
+        if N_cpus==1:
+            # Iterate over first set of bins
+            # Note that we use two sets of indices here, since there are a different number of odd and even bins
+            index1e = -1
+            index1o = -1
+            for bin1 in range(self.Nl):
+                for bin2 in range(bin1,self.Nl_squeeze):
+                    for bin3 in range(bin1,self.Nl):
+                        for bin4 in range(bin3,self.Nl_squeeze):
+                            if bin1==bin3 and bin4<bin2: continue
+                            if bin1==bin3 and bin2==bin4 and parity=='odd': continue
+                            for binL in range(self.NL):
+                                # skip bins outside the triangle conditions
+                                if not self._check_bin(bin1,bin2,binL,even=False): continue
+                                if not self._check_bin(bin3,bin4,binL,even=False): continue
+                                
+                                # Update indices
+                                index1e += 1
+                                if ((bin1==bin3)*(bin2==bin4))!=1:
+                                    index1o += 1 # no equal bins!
+                                
+                                if verb and parity!='odd':
+                                    if (index1e+1)%5==0: print("Computing bin %d of %d"%(index1e+1,self.N_t_even))
+                                if verb and parity=='odd':
+                                    if (index1o+1)%5==0: print("Computing bin %d of %d"%(index1o+1,self.N_t_odd))
+                                        
+                                # Iterate over second set of bins
+                                index2e = -1
+                                index2o = -1
+                                for bin1p in range(self.Nl):
+                                    for bin2p in range(bin1p,self.Nl_squeeze):
+                                        for bin3p in range(bin1p,self.Nl):
+                                            for bin4p in range(bin3p,self.Nl_squeeze):
+                                                if bin1p==bin3p and bin4p<bin2p: continue
+                                                if bin1p==bin3p and bin2p==bin4p and parity=='odd': continue
+                                                for binLp in range(self.NL):
+                                                    # skip bins outside the triangle conditions
+                                                    if not self._check_bin(bin1p,bin2p,binLp,even=False): continue
+                                                    if not self._check_bin(bin3p,bin4p,binLp,even=False): continue
                                                     
-                                                value_even = 0.
-                                                value_odd = 0.
+                                                    # Update indices
+                                                    index2e += 1
+                                                    if ((bin1p==bin3p)*(bin2p==bin4p))!=1:
+                                                        index2o += 1 # no equal bins!
+                                                    
+                                                    # fill in this part by symmetry!
+                                                    if index2e<index1e or index2o<index1o: continue
+                                                        
+                                                    ## Compute permutation factors
+                                                    pref1  = (bin1==bin1p)*(bin2==bin2p)*(bin3==bin3p)*(bin4==bin4p)*(binL==binLp)
+                                                    pref1 += (bin1==bin2p)*(bin2==bin1p)*(bin3==bin3p)*(bin4==bin4p)*(binL==binLp)
+                                                    pref1 += (bin1==bin1p)*(bin2==bin2p)*(bin3==bin4p)*(bin4==bin3p)*(binL==binLp)
+                                                    pref1 += (bin1==bin2p)*(bin2==bin1p)*(bin3==bin4p)*(bin4==bin3p)*(binL==binLp)
+                                                    pref1 += (bin1==bin3p)*(bin2==bin4p)*(bin3==bin1p)*(bin4==bin2p)*(binL==binLp)
+                                                    pref1 += (bin1==bin4p)*(bin2==bin3p)*(bin3==bin1p)*(bin4==bin2p)*(binL==binLp)
+                                                    pref1 += (bin1==bin3p)*(bin2==bin4p)*(bin3==bin2p)*(bin4==bin1p)*(binL==binLp)
+                                                    pref1 += (bin1==bin4p)*(bin2==bin3p)*(bin3==bin2p)*(bin4==bin1p)*(binL==binLp)
 
-                                                # Now iterate over l bins
-                                                for l1 in range(self.min_l+bin1*self.dl,self.min_l+(bin1+1)*self.dl):
-                                                    for l2 in range(self.min_l+bin2*self.dl,self.min_l+(bin2+1)*self.dl):
-                                                        for L in range(self.min_l+binL*self.dl,self.min_l+(binL+1)*self.dl):
-                                                            # first 3j symbols with spin (-1, -1, 2)
-                                                            tj12 = self.threej(l1,l2,L)
-                                                            if L<abs(l1-l2) or L>l1+l2: continue
-                                                            for l3 in range(self.min_l+bin3*self.dl,self.min_l+(bin3+1)*self.dl):
-                                                                for l4 in range(self.min_l+bin4*self.dl,self.min_l+(bin4+1)*self.dl):
-                                                                    if L<abs(l3-l4) or L>l3+l4: continue
-                                                                    
-                                                                    # Continue if wrong-parity, or in [b1=b3, b2=b4] bin and odd
-                                                                    if (-1)**(l1+l2+l3+l4)==-1 and ((bin1==bin3)*(bin2==bin4))==1: continue
-                                                                    if (-1)**(l1+l2+l3+l4)==-1 and ((bin1p==bin3p)*(bin2p==bin4p))==1: continue
-                                                                    if (-1)**(l1+l2+l3+l4)==1 and parity=='odd': continue
-                                                                    if (-1)**(l1+l2+l3+l4)==-1 and parity=='even': continue
-                                                                    
-                                                                    # second 3j symbols with spin (-1, -1, 2)
-                                                                    tj34 = self.threej(l3,l4,L)
-                                                                    
-                                                                    ## add first permutation
-                                                                    if pref1!=0 and tj12*tj34!=0:
+                                                    pref2  = (bin1==bin1p)*(bin2==bin3p)*(bin3==bin2p)*(bin4==bin4p)
+                                                    pref2 += (bin1==bin2p)*(bin2==bin3p)*(bin3==bin1p)*(bin4==bin4p)
+                                                    pref2 += (bin1==bin1p)*(bin2==bin4p)*(bin3==bin2p)*(bin4==bin3p)
+                                                    pref2 += (bin1==bin2p)*(bin2==bin4p)*(bin3==bin1p)*(bin4==bin3p)
+                                                    pref2 += (bin1==bin3p)*(bin2==bin1p)*(bin3==bin4p)*(bin4==bin2p)
+                                                    pref2 += (bin1==bin3p)*(bin2==bin2p)*(bin3==bin4p)*(bin4==bin1p)
+                                                    pref2 += (bin1==bin4p)*(bin2==bin1p)*(bin3==bin3p)*(bin4==bin2p)
+                                                    pref2 += (bin1==bin4p)*(bin2==bin2p)*(bin3==bin3p)*(bin4==bin1p)
+                                                    
+                                                    pref3  = (bin1==bin1p)*(bin2==bin4p)*(bin3==bin3p)*(bin4==bin2p)
+                                                    pref3 += (bin1==bin2p)*(bin2==bin4p)*(bin3==bin3p)*(bin4==bin1p)
+                                                    pref3 += (bin1==bin1p)*(bin2==bin3p)*(bin3==bin4p)*(bin4==bin2p)
+                                                    pref3 += (bin1==bin2p)*(bin2==bin3p)*(bin3==bin4p)*(bin4==bin1p)
+                                                    pref3 += (bin1==bin3p)*(bin2==bin2p)*(bin3==bin1p)*(bin4==bin4p)
+                                                    pref3 += (bin1==bin3p)*(bin2==bin1p)*(bin3==bin2p)*(bin4==bin4p)
+                                                    pref3 += (bin1==bin4p)*(bin2==bin2p)*(bin3==bin1p)*(bin4==bin3p)
+                                                    pref3 += (bin1==bin4p)*(bin2==bin1p)*(bin3==bin2p)*(bin4==bin3p)
+                                                            
+                                                    if pref1+pref2+pref3==0: continue
+                                                        
+                                                    # Check if two sets of bins are permutations of each other (no contribution else!)
+                                                    b1234 = np.sort([bin1,bin2,bin3,bin4])
+                                                    b1234p = np.sort([bin1p,bin2p,bin3p,bin4p])
+                                                    if not (b1234==b1234p).all():
+                                                        continue
+                                            
+                                                    value_even = 0.
+                                                    value_odd = 0.
 
-                                                                        # assemble relevant contribution
-                                                                        if (-1)**(l1+l2+l3+l4)==-1:
-                                                                            value_odd += -pref1*tj12**2*tj34**2*(2.*l1+1.)*(2.*l2+1.)*(2.*l3+1.)*(2.*l4+1.)*(2.*L+1.)/(4.*np.pi)**2/self.base.Cl[l1]/self.base.Cl[l2]/self.base.Cl[l3]/self.base.Cl[l4]
-                                                                        else:
-                                                                            value_even += pref1*tj12**2*tj34**2*(2.*l1+1.)*(2.*l2+1.)*(2.*l3+1.)*(2.*l4+1.)*(2.*L+1.)/(4.*np.pi)**2/self.base.Cl[l1]/self.base.Cl[l2]/self.base.Cl[l3]/self.base.Cl[l4]
+                                                    # Now iterate over l bins
+                                                    for l1 in range(self.min_l+bin1*self.dl,self.min_l+(bin1+1)*self.dl):
+                                                        for l2 in range(self.min_l+bin2*self.dl,self.min_l+(bin2+1)*self.dl):
+                                                            for L in range(self.min_l+binL*self.dl,self.min_l+(binL+1)*self.dl):
 
-                                                                    # Iterate over L' for off-diagonal terms
-                                                                    for Lp in range(self.min_l+binLp*self.dl,self.min_l+(binLp+1)*self.dl):
-                                                                        tj1324 = self.threej(l1,l3,Lp)*self.threej(l2,l4,Lp)
-                                                                        tj1432 = self.threej(l1,l4,Lp)*self.threej(l3,l2,Lp)
+                                                                # Check triangle conditions
+                                                                if L<abs(l1-l2) or L>l1+l2: continue
 
-                                                                        ## add second permutation
-                                                                        if pref2!=0 and tj1324!=0: 
+                                                                # first 3j symbols with spin (-1, -1, 2)
+                                                                tj12 = self.threej(l1,l2,L)
+                                                                
+                                                                for l3 in range(self.min_l+bin3*self.dl,self.min_l+(bin3+1)*self.dl):
+                                                                    for l4 in range(self.min_l+bin4*self.dl,self.min_l+(bin4+1)*self.dl):
+                                                                        if L<abs(l3-l4) or L>l3+l4: continue
+                                                                        
+                                                                        # Continue if wrong-parity, or in [b1=b3, b2=b4] bin and odd
+                                                                        if (-1)**(l1+l2+l3+l4)==-1 and ((bin1==bin3)*(bin2==bin4))==1: continue
+                                                                        if (-1)**(l1+l2+l3+l4)==-1 and ((bin1p==bin3p)*(bin2p==bin4p))==1: continue
+                                                                        if (-1)**(l1+l2+l3+l4)==1 and parity=='odd': continue
+                                                                        if (-1)**(l1+l2+l3+l4)==-1 and parity=='even': continue
+                                                                        
+                                                                        # second 3j symbols with spin (-1, -1, 2)
+                                                                        tj34 = self.threej(l3,l4,L)
+                                                                        
+                                                                        ## add first permutation
+                                                                        if pref1!=0 and tj12*tj34!=0:
+
+                                                                            # assemble relevant contribution
                                                                             if (-1)**(l1+l2+l3+l4)==-1:
-                                                                                value_odd += -pref2*(-1.)**(l2+l3)*tj12*tj34*tj1324*self.sixj(L,l1,l2,Lp,l4,l3)*(2.*l1+1.)*(2.*l2+1.)*(2.*l3+1.)*(2.*l4+1.)*(2.*L+1.)*(2.*Lp+1.)/(4.*np.pi)**2./self.base.Cl[l1]/self.base.Cl[l2]/self.base.Cl[l3]/self.base.Cl[l4]
+                                                                                value_odd += self.beam[l1]**2*self.beam[l2]**2*self.beam[l3]**2*self.beam[l4]**2*pref1*tj12**2*tj34**2*(2.*l1+1.)*(2.*l2+1.)*(2.*l3+1.)*(2.*l4+1.)*(2.*L+1.)/(4.*np.pi)**2/self.base.Cl[l1]/self.base.Cl[l2]/self.base.Cl[l3]/self.base.Cl[l4]
                                                                             else:
-                                                                                value_even += pref2*(-1.)**(l2+l3)*tj12*tj34*tj1324*self.sixj(L,l1,l2,Lp,l4,l3)*(2.*l1+1.)*(2.*l2+1.)*(2.*l3+1.)*(2.*l4+1.)*(2.*L+1.)*(2.*Lp+1.)/(4.*np.pi)**2./self.base.Cl[l1]/self.base.Cl[l2]/self.base.Cl[l3]/self.base.Cl[l4]
+                                                                                value_even += self.beam[l1]**2*self.beam[l2]**2*self.beam[l3]**2*self.beam[l4]**2*pref1*tj12**2*tj34**2*(2.*l1+1.)*(2.*l2+1.)*(2.*l3+1.)*(2.*l4+1.)*(2.*L+1.)/(4.*np.pi)**2/self.base.Cl[l1]/self.base.Cl[l2]/self.base.Cl[l3]/self.base.Cl[l4]
 
-                                                                        ## add third permutation
-                                                                        if pref3!=0 and tj1432!=0:
-                                                                            if (-1)**(l1+l2+l3+l4)==-1:
-                                                                                value_odd += -pref3*(-1.)**(L+Lp)*tj12*tj34*tj1432*self.sixj(L,l1,l2,Lp,l3,l4)*(2.*l1+1.)*(2.*l2+1.)*(2.*l3+1.)*(2.*l4+1.)*(2.*L+1.)*(2*Lp+1.)/(4.*np.pi)**2./self.base.Cl[l1]/self.base.Cl[l2]/self.base.Cl[l3]/self.base.Cl[l4]
+                                                                        if diagonal: continue
+
+                                                                        # Iterate over L' for off-diagonal terms
+                                                                        for Lp in range(self.min_l+binLp*self.dl,self.min_l+(binLp+1)*self.dl):
+
+                                                                            # Impose 6j symmetries
+                                                                            if Lp<abs(l3-l4) or Lp>l3+l4: continue
+                                                                            if Lp<abs(l1-l2) or Lp>l1+l2: continue
+                                                                            
+                                                                            # Compute 3j symbols if non-zero
+                                                                            if Lp>=abs(l1-l3) and Lp<=l1+l3 and Lp>=abs(l2-l4) and Lp<=l2+l4: 
+                                                                                tj1324 = self.threej(l1,l3,Lp)*self.threej(l2,l4,Lp)
                                                                             else:
-                                                                                value_even += pref3*(-1.)**(L+Lp)*tj12*tj34*tj1432*self.sixj(L,l1,l2,Lp,l3,l4)*(2.*l1+1.)*(2.*l2+1.)*(2.*l3+1.)*(2.*l4+1.)*(2.*L+1.)*(2*Lp+1.)/(4.*np.pi)**2./self.base.Cl[l1]/self.base.Cl[l2]/self.base.Cl[l3]/self.base.Cl[l4]
-                                                                    
-                                                if parity!='even' and ((bin1==bin3)*(bin2==bin4)!=1) and ((bin1p==bin3p)*(bin2p==bin4p)!=1):
-                                                    fish_odd[index1o, index2o] = value_odd
-                                                if parity!='odd':
-                                                    fish_even[index1e, index2e] = value_even
+                                                                                tj1324 = 0
+                                                                            if Lp>=abs(l1-l4) and Lp<=l1+l4 and Lp>=abs(l2-l3) and Lp<=l2+l3:
+                                                                                tj1432 = self.threej(l1,l4,Lp)*self.threej(l3,l2,Lp)
+                                                                            else:
+                                                                                tj1432 = 0
+
+                                                                            ## add second permutation
+                                                                            if pref2!=0 and tj1324!=0: 
+                                                                                if (-1)**(l1+l2+l3+l4)==-1:
+                                                                                    value_odd += self.beam[l1]**2*self.beam[l2]**2*self.beam[l3]**2*self.beam[l4]**2*pref2*(-1.)**(l2+l3)*tj12*tj34*tj1324*self.sixj(L,l1,l2,Lp,l4,l3)*(2.*l1+1.)*(2.*l2+1.)*(2.*l3+1.)*(2.*l4+1.)*(2.*L+1.)*(2.*Lp+1.)/(4.*np.pi)**2./self.base.Cl[l1]/self.base.Cl[l2]/self.base.Cl[l3]/self.base.Cl[l4]
+                                                                                else:
+                                                                                    value_even += self.beam[l1]**2*self.beam[l2]**2*self.beam[l3]**2*self.beam[l4]**2*pref2*(-1.)**(l2+l3)*tj12*tj34*tj1324*self.sixj(L,l1,l2,Lp,l4,l3)*(2.*l1+1.)*(2.*l2+1.)*(2.*l3+1.)*(2.*l4+1.)*(2.*L+1.)*(2.*Lp+1.)/(4.*np.pi)**2./self.base.Cl[l1]/self.base.Cl[l2]/self.base.Cl[l3]/self.base.Cl[l4]
+
+                                                                            ## add third permutation
+                                                                            if pref3!=0 and tj1432!=0:
+                                                                                if (-1)**(l1+l2+l3+l4)==-1:
+                                                                                    value_odd += self.beam[l1]**2*self.beam[l2]**2*self.beam[l3]**2*self.beam[l4]**2*pref3*(-1.)**(L+Lp)*tj12*tj34*tj1432*self.sixj(L,l1,l2,Lp,l3,l4)*(2.*l1+1.)*(2.*l2+1.)*(2.*l3+1.)*(2.*l4+1.)*(2.*L+1.)*(2*Lp+1.)/(4.*np.pi)**2./self.base.Cl[l1]/self.base.Cl[l2]/self.base.Cl[l3]/self.base.Cl[l4]
+                                                                                else:
+                                                                                    value_even += self.beam[l1]**2*self.beam[l2]**2*self.beam[l3]**2*self.beam[l4]**2*pref3*(-1.)**(L+Lp)*tj12*tj34*tj1432*self.sixj(L,l1,l2,Lp,l3,l4)*(2.*l1+1.)*(2.*l2+1.)*(2.*l3+1.)*(2.*l4+1.)*(2.*L+1.)*(2*Lp+1.)/(4.*np.pi)**2./self.base.Cl[l1]/self.base.Cl[l2]/self.base.Cl[l3]/self.base.Cl[l4]
+                                                                        
+                                                    # Note that matrix is symmetric if ideal!
+                                                    if parity!='even' and ((bin1==bin3)*(bin2==bin4)!=1) and ((bin1p==bin3p)*(bin2p==bin4p)!=1):
+                                                        fish_odd[index1o, index2o] = value_odd
+                                                        fish_odd[index2o, index1o] = value_odd
+                                                    if parity!='odd':
+                                                        fish_even[index1e, index2e] = value_even
+                                                        fish_even[index2e, index1e] = value_even
+        elif N_cpus>1:
+
+            global _iterator
+            def _iterator(index1e_input):
+                """Create an iterator for multiprocessing. This iterates over the first index."""
+                # Iterate over first set of bins
+                # Note that we use two sets of indices here, since there are a different number of odd and even bins
+                
+                if parity!='even':
+                    fish_odd_internal = np.zeros((self.N_t_odd, self.N_t_odd))
+                if parity!='odd':
+                    fish_even_internal = np.zeros((self.N_t_even, self.N_t_even))
+                
+                index1e = -1
+                index1o = -1
+                print("Using index %d"%index1e_input)
+                for bin1 in range(self.Nl):
+                    for bin2 in range(bin1,self.Nl_squeeze):
+                        for bin3 in range(bin1,self.Nl):
+                            for bin4 in range(bin3,self.Nl_squeeze):
+                                if bin1==bin3 and bin4<bin2: continue
+                                if bin1==bin3 and bin2==bin4 and parity=='odd': continue
+                                for binL in range(self.NL):
+                                    # skip bins outside the triangle conditions
+                                    if not self._check_bin(bin1,bin2,binL,even=False): continue
+                                    if not self._check_bin(bin3,bin4,binL,even=False): continue
+                                    
+                                    # Update indices
+                                    index1e += 1
+
+                                    if ((bin1==bin3)*(bin2==bin4))!=1:
+                                        index1o += 1 # no equal bins!
+
+                                    # Specialize to only the desired index
+                                    if index1e!=index1e_input:
+                                        continue
+                                        
+                                    # Iterate over second set of bins
+                                    index2e = -1
+                                    index2o = -1
+                                    for bin1p in range(self.Nl):
+                                        for bin2p in range(bin1p,self.Nl_squeeze):
+                                            for bin3p in range(bin1p,self.Nl):
+                                                for bin4p in range(bin3p,self.Nl_squeeze):
+                                                    if bin1p==bin3p and bin4p<bin2p: continue
+                                                    if bin1p==bin3p and bin2p==bin4p and parity=='odd': continue
+                                                    for binLp in range(self.NL):
+                                                        # skip bins outside the triangle conditions
+                                                        if not self._check_bin(bin1p,bin2p,binLp,even=False): continue
+                                                        if not self._check_bin(bin3p,bin4p,binLp,even=False): continue
+                                                        
+                                                        # Update indices
+                                                        index2e += 1
+                                                        if ((bin1p==bin3p)*(bin2p==bin4p))!=1:
+                                                            index2o += 1 # no equal bins!
+                                                            
+                                                        # fill in this part by symmetry!
+                                                        if index2e<index1e or index2o<index1o: continue
+                                                        
+                                                        ## Compute permutation factors
+                                                        pref1  = (bin1==bin1p)*(bin2==bin2p)*(bin3==bin3p)*(bin4==bin4p)*(binL==binLp)
+                                                        pref1 += (bin1==bin2p)*(bin2==bin1p)*(bin3==bin3p)*(bin4==bin4p)*(binL==binLp)
+                                                        pref1 += (bin1==bin1p)*(bin2==bin2p)*(bin3==bin4p)*(bin4==bin3p)*(binL==binLp)
+                                                        pref1 += (bin1==bin2p)*(bin2==bin1p)*(bin3==bin4p)*(bin4==bin3p)*(binL==binLp)
+                                                        pref1 += (bin1==bin3p)*(bin2==bin4p)*(bin3==bin1p)*(bin4==bin2p)*(binL==binLp)
+                                                        pref1 += (bin1==bin4p)*(bin2==bin3p)*(bin3==bin1p)*(bin4==bin2p)*(binL==binLp)
+                                                        pref1 += (bin1==bin3p)*(bin2==bin4p)*(bin3==bin2p)*(bin4==bin1p)*(binL==binLp)
+                                                        pref1 += (bin1==bin4p)*(bin2==bin3p)*(bin3==bin2p)*(bin4==bin1p)*(binL==binLp)
+
+                                                        pref2  = (bin1==bin1p)*(bin2==bin3p)*(bin3==bin2p)*(bin4==bin4p)
+                                                        pref2 += (bin1==bin2p)*(bin2==bin3p)*(bin3==bin1p)*(bin4==bin4p)
+                                                        pref2 += (bin1==bin1p)*(bin2==bin4p)*(bin3==bin2p)*(bin4==bin3p)
+                                                        pref2 += (bin1==bin2p)*(bin2==bin4p)*(bin3==bin1p)*(bin4==bin3p)
+                                                        pref2 += (bin1==bin3p)*(bin2==bin1p)*(bin3==bin4p)*(bin4==bin2p)
+                                                        pref2 += (bin1==bin3p)*(bin2==bin2p)*(bin3==bin4p)*(bin4==bin1p)
+                                                        pref2 += (bin1==bin4p)*(bin2==bin1p)*(bin3==bin3p)*(bin4==bin2p)
+                                                        pref2 += (bin1==bin4p)*(bin2==bin2p)*(bin3==bin3p)*(bin4==bin1p)
+                                                        
+                                                        pref3  = (bin1==bin1p)*(bin2==bin4p)*(bin3==bin3p)*(bin4==bin2p)
+                                                        pref3 += (bin1==bin2p)*(bin2==bin4p)*(bin3==bin3p)*(bin4==bin1p)
+                                                        pref3 += (bin1==bin1p)*(bin2==bin3p)*(bin3==bin4p)*(bin4==bin2p)
+                                                        pref3 += (bin1==bin2p)*(bin2==bin3p)*(bin3==bin4p)*(bin4==bin1p)
+                                                        pref3 += (bin1==bin3p)*(bin2==bin2p)*(bin3==bin1p)*(bin4==bin4p)
+                                                        pref3 += (bin1==bin3p)*(bin2==bin1p)*(bin3==bin2p)*(bin4==bin4p)
+                                                        pref3 += (bin1==bin4p)*(bin2==bin2p)*(bin3==bin1p)*(bin4==bin3p)
+                                                        pref3 += (bin1==bin4p)*(bin2==bin1p)*(bin3==bin2p)*(bin4==bin3p)
+                                                                
+                                                        if pref1+pref2+pref3==0: continue
+                                                            
+                                                        value_even = 0.
+                                                        value_odd = 0.
+
+                                                        # Now iterate over l bins
+                                                        for l1 in range(self.min_l+bin1*self.dl,self.min_l+(bin1+1)*self.dl):
+                                                            for l2 in range(self.min_l+bin2*self.dl,self.min_l+(bin2+1)*self.dl):
+                                                                for L in range(self.min_l+binL*self.dl,self.min_l+(binL+1)*self.dl):
+                                                                    # Check triangle conditions
+                                                                    if L<abs(l1-l2) or L>l1+l2: continue
+                                                                    # first 3j symbols with spin (-1, -1, 2)
+                                                                    tj12 = self.threej(l1,l2,L)
+                                                                    for l3 in range(self.min_l+bin3*self.dl,self.min_l+(bin3+1)*self.dl):
+                                                                        for l4 in range(self.min_l+bin4*self.dl,self.min_l+(bin4+1)*self.dl):
+                                                                            if L<abs(l3-l4) or L>l3+l4: continue
+                                                                            
+                                                                            # Continue if wrong-parity, or in [b1=b3, b2=b4] bin and odd
+                                                                            if (-1)**(l1+l2+l3+l4)==-1 and ((bin1==bin3)*(bin2==bin4))==1: continue
+                                                                            if (-1)**(l1+l2+l3+l4)==-1 and ((bin1p==bin3p)*(bin2p==bin4p))==1: continue
+                                                                            if (-1)**(l1+l2+l3+l4)==1 and parity=='odd': continue
+                                                                            if (-1)**(l1+l2+l3+l4)==-1 and parity=='even': continue
+                                                                            
+                                                                            # second 3j symbols with spin (-1, -1, 2)
+                                                                            tj34 = self.threej(l3,l4,L)
+                                                                            
+                                                                            ## add first permutation
+                                                                            if pref1!=0 and tj12*tj34!=0:
+
+                                                                                # assemble relevant contribution
+                                                                                if (-1)**(l1+l2+l3+l4)==-1:
+                                                                                    value_odd += self.beam[l1]**2*self.beam[l2]**2*self.beam[l3]**2*self.beam[l4]**2*pref1*tj12**2*tj34**2*(2.*l1+1.)*(2.*l2+1.)*(2.*l3+1.)*(2.*l4+1.)*(2.*L+1.)/(4.*np.pi)**2/self.base.Cl[l1]/self.base.Cl[l2]/self.base.Cl[l3]/self.base.Cl[l4]
+                                                                                else:
+                                                                                    value_even += self.beam[l1]**2*self.beam[l2]**2*self.beam[l3]**2*self.beam[l4]**2*pref1*tj12**2*tj34**2*(2.*l1+1.)*(2.*l2+1.)*(2.*l3+1.)*(2.*l4+1.)*(2.*L+1.)/(4.*np.pi)**2/self.base.Cl[l1]/self.base.Cl[l2]/self.base.Cl[l3]/self.base.Cl[l4]
+
+                                                                            if diagonal: continue
+
+                                                                            # Iterate over L' for off-diagonal terms
+                                                                            for Lp in range(self.min_l+binLp*self.dl,self.min_l+(binLp+1)*self.dl):
+                                                                                # Impose 6j symmetries
+                                                                                if Lp<abs(l3-l4) or Lp>l3+l4: continue
+                                                                                if Lp<abs(l1-l2) or Lp>l1+l2: continue
+                                                                                
+                                                                                # Compute 3j symbols if non-zero
+                                                                                if Lp>=abs(l1-l3) and Lp<=l1+l3 and Lp>=abs(l2-l4) and Lp<=l2+l4: 
+                                                                                    tj1324 = self.threej(l1,l3,Lp)*self.threej(l2,l4,Lp)
+                                                                                else:
+                                                                                    tj1324 = 0
+                                                                                if Lp>=abs(l1-l4) and Lp<=l1+l4 and Lp>=abs(l2-l3) and Lp<=l2+l3:
+                                                                                    tj1432 = self.threej(l1,l4,Lp)*self.threej(l3,l2,Lp)
+                                                                                else:
+                                                                                    tj1432 = 0
+
+                                                                                ## add second permutation
+                                                                                if pref2!=0 and tj1324!=0: 
+                                                                                    if (-1)**(l1+l2+l3+l4)==-1:
+                                                                                        value_odd += self.beam[l1]**2*self.beam[l2]**2*self.beam[l3]**2*self.beam[l4]**2*pref2*(-1.)**(l2+l3)*tj12*tj34*tj1324*self.sixj(L,l1,l2,Lp,l4,l3)*(2.*l1+1.)*(2.*l2+1.)*(2.*l3+1.)*(2.*l4+1.)*(2.*L+1.)*(2.*Lp+1.)/(4.*np.pi)**2./self.base.Cl[l1]/self.base.Cl[l2]/self.base.Cl[l3]/self.base.Cl[l4]
+                                                                                    else:
+                                                                                        value_even += self.beam[l1]**2*self.beam[l2]**2*self.beam[l3]**2*self.beam[l4]**2*pref2*(-1.)**(l2+l3)*tj12*tj34*tj1324*self.sixj(L,l1,l2,Lp,l4,l3)*(2.*l1+1.)*(2.*l2+1.)*(2.*l3+1.)*(2.*l4+1.)*(2.*L+1.)*(2.*Lp+1.)/(4.*np.pi)**2./self.base.Cl[l1]/self.base.Cl[l2]/self.base.Cl[l3]/self.base.Cl[l4]
+
+                                                                                ## add third permutation
+                                                                                if pref3!=0 and tj1432!=0:
+                                                                                    if (-1)**(l1+l2+l3+l4)==-1:
+                                                                                        value_odd += self.beam[l1]**2*self.beam[l2]**2*self.beam[l3]**2*self.beam[l4]**2*pref3*(-1.)**(L+Lp)*tj12*tj34*tj1432*self.sixj(L,l1,l2,Lp,l3,l4)*(2.*l1+1.)*(2.*l2+1.)*(2.*l3+1.)*(2.*l4+1.)*(2.*L+1.)*(2*Lp+1.)/(4.*np.pi)**2./self.base.Cl[l1]/self.base.Cl[l2]/self.base.Cl[l3]/self.base.Cl[l4]
+                                                                                    else:
+                                                                                        value_even += self.beam[l1]**2*self.beam[l2]**2*self.beam[l3]**2*self.beam[l4]**2*pref3*(-1.)**(L+Lp)*tj12*tj34*tj1432*self.sixj(L,l1,l2,Lp,l3,l4)*(2.*l1+1.)*(2.*l2+1.)*(2.*l3+1.)*(2.*l4+1.)*(2.*L+1.)*(2*Lp+1.)/(4.*np.pi)**2./self.base.Cl[l1]/self.base.Cl[l2]/self.base.Cl[l3]/self.base.Cl[l4]
+                                                                            
+                                                        # Note that matrix is symmetric if ideal!
+                                                        if parity!='even' and ((bin1==bin3)*(bin2==bin4)!=1) and ((bin1p==bin3p)*(bin2p==bin4p)!=1):
+                                                            fish_odd_internal[index1o, index2o] = value_odd
+                                                            fish_odd_internal[index2o, index1o] = value_odd
+                                                        if parity!='odd':
+                                                            fish_even_internal[index1e, index2e] = value_even
+                                                            fish_even_internal[index2e, index1e] = value_even
+
+                if parity=='odd':
+                    return fish_odd_internal
+                elif parity=='even':
+                    return fish_even_internal
+                else:
+                    return fish_even_internal, fish_odd_internal
+
+            # Now run multiprocessing
+            p = mp.Pool(N_cpus)
+            print("Multiprocessing computation on %d cores"%N_cpus)
+
+            result = list(tqdm.tqdm(p.imap_unordered(_iterator,range(self.N_t_even)),total=self.N_t_even))
+            if parity=='odd':
+                fish_odd = np.sum(result,axis=0)
+            elif parity=='even':
+                fish_even = np.sum(result,axis=0)
+            else:
+                fish_even = np.sum([r[0] for r in result],axis=0)
+                fish_odd  = np.sum([r[1] for r in result],axis=0)
+
+        else:
+            raise Exception("Need at least one CPU!")
 
         # Add symmetry factors and save attributes
         if parity!='even':
@@ -1326,6 +1645,8 @@ class TSpec():
         Compute the idealized trispectrum estimator, including normalization, if not supplied or already computed. Note that this normalizes by < mask^4 >.
         
         The `parity' parameter can be 'even', 'odd' or 'both'. This specifies what parity trispectra to compute.
+
+        Note that we return the imaginary part of the odd-parity trispectrum.
 
         We can also optionally switch off the disconnected terms. This only affects the parity-even trispectrum.
         """
