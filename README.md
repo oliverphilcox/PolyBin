@@ -1,15 +1,14 @@
 # PolyBin
-PolyBin estimates the binned power spectrum, bispectrum, and trispectrum for full-sky HEALPix maps such as the CMB, using the algorithms of [Philcox 2023](TODO). For each statistic, two estimators are available: the standard (ideal) estimators, which do not take into account the mask, and window-deconvolved estimators. In the second case, we require computation of a Fisher matrix; this depends on binning and the mask, but does not need to be recomputed for each new simulation. For the trispectra, we can compute both the *parity-even* and *parity-odd* components.
+PolyBin estimates the binned power spectrum, bispectrum, and trispectrum for full-sky scalar HEALPix maps such as the CMB, using the algorithms of [Philcox 2023](https://arxiv.org/abs/2301.XXXXX). For each statistic, two estimators are available: the standard (ideal) estimators, which do not take into account the mask, and window-deconvolved estimators. In the second case, we require computation of a Fisher matrix; this depends on binning and the mask, but does not need to be recomputed for each new simulation. For the trispectra, we can compute both the *parity-even* and *parity-odd* components.
 
 PolyBin contains the following modules:
 - `pspec`: Binned (auto) power spectra
 - `bspec`: Binned (auto) bispectra
 - `tspec`: Binned (auto) parity-even and parity-odd trispectra
 
-Other functions can straightforwardly be added!
+Extension to cross-spectra and fields with non-zero spin, such as polarization, is, in principle, straightforward.
 
-## Usage
-See the [Tutorial](Tutorial.ipynb)
+For usage details, see the [Tutorial](Tutorial.ipynb). In the [planck_trispectrum](planck_trispectrum/) directory, we present details from the analysis of the Planck parity-odd trispectrum in [Philcox 2023](https://arxiv.org/abs/2301.XXXXX).
 
 ### Authors
 - [Oliver Philcox](mailto:ohep2@cantab.ac.uk) (Columbia / Simons Foundation)
@@ -20,3 +19,7 @@ See the [Tutorial](Tutorial.ipynb)
 - pywigxjpf
 - fitsio
 - tqdm
+
+### References
+- Philcox (2023): "Optimal Estimation of the Binned Mask-Free Power Spectrum, Bispectrum, and Trispectrum on the Full Sky", [(arXiv)](https://arxiv.org/abs/2301.XXXXX)
+- Philcox (2023): "Do the CMB Temperature Fluctuations Conserve Parity?", [(arXiv)](https://arxiv.org/abs/2301.XXXXX)
