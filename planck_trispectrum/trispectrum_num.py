@@ -49,7 +49,7 @@ beam_int = InterpolatedUnivariateSpline(np.arange(len(beam_dat)),beam_dat)
 beam = beam_int(l)*(l>=2)+(l<2)*1
 
 # Base class
-Sl_weighting = np.load('planck/Sl_weighting.npy')
+Sl_weighting = np.load('Sl_weighting.npy')
 assert len(Sl_weighting)==lmax+1
 base = pb.PolyBin(Nside, Sl_weighting, beam=beam)
 

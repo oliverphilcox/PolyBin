@@ -169,7 +169,7 @@ def _check_bin(bin1, bin2, bin3, even=False):
     
 # Define ell arrays and custom harmonic-space weighting
 l = np.arange(lmax+1)
-Sl = np.load('planck/Sl_weighting.npy')
+Sl = np.load('Sl_weighting.npy')
 
 ########################### COMPUTE TRISPECTRA ###########################
 

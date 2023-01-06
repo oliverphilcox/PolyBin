@@ -101,7 +101,7 @@ elif transfer=='full':
 
 # Define ell arrays and custom harmonic-space weighting
 l = np.arange(lmax+1)
-Sl = np.load('planck/Sl_weighting.npy')
+Sl = np.load('Sl_weighting.npy')
 
 # 3j/9j set-up
 wig.wig_table_init(4*lmax+4,9)

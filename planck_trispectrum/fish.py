@@ -57,7 +57,7 @@ cosmo = Class()
 
 # Define ell arrays and weighting
 l = np.arange(lmax+1)
-Sl = np.load('planck/Sl_weighting.npy')
+Sl = np.load('Sl_weighting.npy')
 beam = 1.+0.*l
 
 # Load class with fiducial Cl and Nside (ensuring no zeros in Cl_th)
