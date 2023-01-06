@@ -12,50 +12,61 @@ class TSpec():
     Trispectrum estimation class. This takes the binning strategy as input and a base class. 
     We also feed in a function that applies the S^-1 operator in real space.
 
-    Note that we can additionally compute squeezed tetrahedra by setting Nl_squeeze > Nl, giving a different lmax for short and long sides.
+    Note that we can additionally compute squeezed tetrahedra by setting l_bins_squeeze, giving a different lmax for short and long sides.
     We allow sides l2, l4 and L to have higher ell in this set-up (noting that l2 > l1, l4 > l3, and that {l1,l2,L} and {l3,l4,L} obey triangle conditions.)
     
+    We can also specialize to collapsed tetrahedra, by restricting the range of L using L_bins.
+
     Inputs:
     - base: PolyBin class
     - mask: HEALPix mask to deconvolve
     - applySinv: function which returns S^-1 applied to a given input map
-    - min_l, dl, Nl: binning parameters
-    - Nl_squeeze: number of squeezed ell bins (optional)
-    - NL: number of L bins (optional)
+    - l_bins: array of bin edges
+    - l_bins_squeeze: array of squeezed bin edges (optional)
+    - L_bins: array of diagonal bin edges (optional)
     - include_partial_triangles: whether to include triangles (in l1,l2,L or l3,l4,L) whose centers don't satisfy the triangle conditions. (Default: False)
     """
-    def __init__(self, base, mask, applySinv, min_l, dl, Nl, Nl_squeeze=None, NL=None, include_partial_triangles=False):
+    def __init__(self, base, mask, applySinv, l_bins, l_bins_squeeze=[], L_bins=[], include_partial_triangles=False):
         # Read in attributes
         self.base = base
         self.mask = mask
         self.applySinv = applySinv
-        self.min_l = min_l
-        self.dl = dl
-        self.Nl = Nl
-        if Nl_squeeze!=None:
-            assert Nl_squeeze>=Nl, "Squeezed Nl must be at least as large as Nl!"
-            self.Nl_squeeze = Nl_squeeze
+        self.l_bins = l_bins
+        self.min_l = np.min(l_bins)
+        self.Nl = len(l_bins)-1
+
+        if len(l_bins_squeeze)>0:
+            self.l_bins_squeeze = l_bins_squeeze
+            self.Nl_squeeze = len(l_bins_squeeze)-1
+            for l_edge in self.l_bins:
+                assert l_edge in self.l_bins_squeeze, "Squeezed bins must contain all the unsqueezed bins!"
         else:
-            self.Nl_squeeze = Nl
-        if NL!=None:
-            assert NL<=self.Nl_squeeze, "NL shouldn't be larger than squeezed Nl!"
-            self.NL = NL
+            self.l_bins_squeeze = self.l_bins.copy()
+            self.Nl_squeeze = self.Nl
+
+        if len(L_bins)>0:
+            self.L_bins = L_bins
+            self.NL = len(L_bins)-1
+            for L_edge in self.L_bins:
+                assert L_edge in self.l_bins_squeeze, "l-bins must contain all L-bins!"
         else:
-            self.NL = self.Nl_squeeze
+            self.L_bins = self.l_bins.copy()
+            self.NL = self.Nl
+
         self.beam = self.base.beam
         self.beam_lm = self.base.beam_lm
         self.include_partial_triangles = include_partial_triangles
         
-        if min_l+Nl*dl>base.lmax:
+        if np.max(self.l_bins_squeeze)>base.lmax:
             raise Exception("Maximum l is larger than HEALPix resolution!")
-        print("Binning: %d bins in [%d, %d]"%(Nl,min_l,min_l+Nl*dl))
+        print("Binning: %d bins in [%d, %d]"%(self.Nl,self.min_l,np.max(self.l_bins)))
         if self.Nl_squeeze!=self.Nl:
-            print("Squeezed binning: %d bins in [%d, %d]"%(Nl_squeeze,min_l,min_l+Nl_squeeze*dl))
+            print("Squeezed binning: %d bins in [%d, %d]"%(self.Nl_squeeze,self.min_l,np.max(self.l_bins_squeeze)))
         if self.NL!=self.Nl_squeeze:
-            print("L binning: %d bins in [%d, %d]"%(NL,min_l,min_l+NL*dl)) 
+            print("L binning: %d bins in [%d, %d]"%(self.NL,self.min_l,np.max(self.L_bins))) 
         
         # Define l filters
-        self.ell_bins = [(self.base.l_arr>=self.min_l+self.dl*bin1)&(self.base.l_arr<self.min_l+self.dl*(bin1+1)) for bin1 in range(self.Nl_squeeze)]
+        self.ell_bins = [(self.base.l_arr>=self.l_bins_squeeze[bin1])&(self.base.l_arr<self.l_bins_squeeze[bin1+1]) for bin1 in range(self.Nl_squeeze)]
         self.phase_factor = (-1.)**self.base.l_arr
 
         # Define m weights (for complex conjugates)
@@ -79,9 +90,9 @@ class TSpec():
         """
         if self.include_partial_triangles:
             good = 0
-            for l1 in range(self.min_l+bin1*self.dl,self.min_l+(bin1+1)*self.dl):
-                for l2 in range(self.min_l+bin2*self.dl,self.min_l+(bin2+1)*self.dl):
-                    for l3 in range(self.min_l+bin3*self.dl,self.min_l+(bin3+1)*self.dl):
+            for l1 in range(self.l_bins_squeeze[bin1],self.l_bins_squeeze[bin1+1]):
+                for l2 in range(self.l_bins_squeeze[bin2],self.l_bins_squeeze[bin2+1]):
+                    for l3 in range(self.l_bins_squeeze[bin3],self.l_bins_squeeze[bin3+1]):
                         # skip any odd bins
                         if ((-1)**(l1+l2+l3)==-1) and even: continue 
                         if l1>=abs(l1-l2) and l3<=l1+l2:
@@ -93,9 +104,9 @@ class TSpec():
             else:
                 return 0
         else:
-            l1 = self.min_l+(bin1+0.5)*self.dl-0.5
-            l2 = self.min_l+(bin2+0.5)*self.dl-0.5
-            l3 = self.min_l+(bin3+0.5)*self.dl-0.5
+            l1 = 0.5*(self.l_bins_squeeze[bin1]+self.l_bins_squeeze[bin1+1])
+            l2 = 0.5*(self.l_bins_squeeze[bin2]+self.l_bins_squeeze[bin2+1])
+            l3 = 0.5*(self.l_bins_squeeze[bin3]+self.l_bins_squeeze[bin3+1])
             if l3<abs(l1-l2) or l3>l1+l2:
                 return 0
             else:
@@ -193,18 +204,18 @@ class TSpec():
 
         # Iterate over bins with b2>=b1, b4>=b3, b3>=b1 and b4>b2 if b1=b3
         for bin1 in range(self.Nl):
-            l1 = self.min_l+(bin1+0.5)*dl-0.5
+            l1 = 0.5*(self.l_bins[bin1]+self.l_bins[bin1+1])
             for bin2 in range(bin1,self.Nl_squeeze):
-                l2 = self.min_l+(bin2+0.5)*self.dl-0.5
+                l2 = 0.5*(self.l_bins_squeeze[bin2]+self.l_bins_squeeze[bin2+1])
                 for bin3 in range(bin1,self.Nl):
-                    l3 = self.min_l+(bin3+0.5)*self.dl-0.5
+                    l3 =  0.5*(self.l_bins[bin3]+self.l_bins[bin3+1])
                     for bin4 in range(bin3,self.Nl_squeeze):
-                        l4 = self.min_l+(bin4+0.5)*self.dl-0.5
+                        l4 = 0.5*(self.l_bins_squeeze[bin4]+self.l_bins_squeeze[bin4+1])
                         if bin1==bin3 and bin4<bin2: continue
                         
                         # Iterate over L bins
                         for binL in range(self.NL):
-                            L = self.min_l+(binL+0.5)*self.dl-0.5
+                            L = 0.5*(self.L_bins[binL]+self.L_bins[binL+1])
 
                             # skip bins outside the triangle conditions
                             if not self._check_bin(bin1,bin2,binL,even=False): continue
@@ -1180,17 +1191,17 @@ class TSpec():
 
                                     # Sum over ells for two- and zero-point terms
                                     value2, value0 = 0., 0.
-                                    for l1 in range(self.min_l+bin1*self.dl,self.min_l+(bin1+1)*self.dl):
+                                    for l1 in range(self.l_bins[bin1],self.l_bins[bin1+1]):
 
                                         # Compute sum over l1
                                         Cinvsq_l1 = np.sum(Cinv_data_lm_sq[self.base.l_arr==l1]*self.beam[l1]**2)
 
-                                        for l2 in range(self.min_l+bin2*self.dl,self.min_l+(bin2+1)*self.dl):
+                                        for l2 in range(self.l_bins_squeeze[bin2],self.l_bins_squeeze[bin2+1]):
 
                                             # Compute sum over l2
                                             Cinvsq_l2 = np.sum(Cinv_data_lm_sq[self.base.l_arr==l2]*self.beam[l2]**2)
                                             
-                                            for L in range(self.min_l+binL*self.dl,self.min_l+(binL+1)*self.dl):
+                                            for L in range(self.L_bins[binL],self.L_bins[binL+1]):
                                                 if L<abs(l1-l2) or L>l1+l2: continue
 
                                                 # define 3j symbols with spin (-1, -1, 2)
@@ -1365,9 +1376,9 @@ class TSpec():
                                                     value_odd = 0.
 
                                                     # Now iterate over l bins
-                                                    for l1 in range(self.min_l+bin1*self.dl,self.min_l+(bin1+1)*self.dl):
-                                                        for l2 in range(self.min_l+bin2*self.dl,self.min_l+(bin2+1)*self.dl):
-                                                            for L in range(self.min_l+binL*self.dl,self.min_l+(binL+1)*self.dl):
+                                                    for l1 in range(self.l_bins[bin1],self.l_bins[bin1+1]):
+                                                        for l2 in range(self.l_bins_squeeze[bin2],self.l_bins_squeeze[bin2+1]):
+                                                            for L in range(self.L_bins[binL],self.L_bins[binL+1]):
 
                                                                 # Check triangle conditions
                                                                 if L<abs(l1-l2) or L>l1+l2: continue
@@ -1375,8 +1386,8 @@ class TSpec():
                                                                 # first 3j symbols with spin (-1, -1, 2)
                                                                 tj12 = self.threej(l1,l2,L)
                                                                 
-                                                                for l3 in range(self.min_l+bin3*self.dl,self.min_l+(bin3+1)*self.dl):
-                                                                    for l4 in range(self.min_l+bin4*self.dl,self.min_l+(bin4+1)*self.dl):
+                                                                for l3 in range(self.l_bins[bin3],self.l_bins[bin3+1]):
+                                                                    for l4 in range(self.l_bins_squeeze[bin4],self.l_bins_squeeze[bin4+1]):
                                                                         if L<abs(l3-l4) or L>l3+l4: continue
                                                                         
                                                                         # Continue if wrong-parity, or in [b1=b3, b2=b4] bin and odd
@@ -1400,7 +1411,7 @@ class TSpec():
                                                                         if diagonal: continue
 
                                                                         # Iterate over L' for off-diagonal terms
-                                                                        for Lp in range(self.min_l+binLp*self.dl,self.min_l+(binLp+1)*self.dl):
+                                                                        for Lp in range(self.L_bins[binLp],self.L_bins[binLp+1]):
 
                                                                             # Impose 6j symmetries
                                                                             if Lp<abs(l3-l4) or Lp>l3+l4: continue
@@ -1530,15 +1541,15 @@ class TSpec():
                                                         value_odd = 0.
 
                                                         # Now iterate over l bins
-                                                        for l1 in range(self.min_l+bin1*self.dl,self.min_l+(bin1+1)*self.dl):
-                                                            for l2 in range(self.min_l+bin2*self.dl,self.min_l+(bin2+1)*self.dl):
-                                                                for L in range(self.min_l+binL*self.dl,self.min_l+(binL+1)*self.dl):
+                                                        for l1 in range(self.l_bins[bin1],self.l_bins[bin1+1]):
+                                                            for l2 in range(self.l_bins_squeeze[bin2],self.l_bins_squeeze[bin2+1]):
+                                                                for L in range(self.L_bins[binL],self.L_bins[binL+1]):
                                                                     # Check triangle conditions
                                                                     if L<abs(l1-l2) or L>l1+l2: continue
                                                                     # first 3j symbols with spin (-1, -1, 2)
                                                                     tj12 = self.threej(l1,l2,L)
-                                                                    for l3 in range(self.min_l+bin3*self.dl,self.min_l+(bin3+1)*self.dl):
-                                                                        for l4 in range(self.min_l+bin4*self.dl,self.min_l+(bin4+1)*self.dl):
+                                                                    for l3 in range(self.l_bins[bin3],self.l_bins[bin3+1]):
+                                                                        for l4 in range(self.l_bins_squeeze[bin4],self.l_bins_squeeze[bin4+1]):
                                                                             if L<abs(l3-l4) or L>l3+l4: continue
                                                                             
                                                                             # Continue if wrong-parity, or in [b1=b3, b2=b4] bin and odd
@@ -1562,7 +1573,7 @@ class TSpec():
                                                                             if diagonal: continue
 
                                                                             # Iterate over L' for off-diagonal terms
-                                                                            for Lp in range(self.min_l+binLp*self.dl,self.min_l+(binLp+1)*self.dl):
+                                                                            for Lp in range(self.L_bins[binLp],self.L_bins[binLp+1]):
                                                                                 # Impose 6j symmetries
                                                                                 if Lp<abs(l3-l4) or Lp>l3+l4: continue
                                                                                 if Lp<abs(l1-l2) or Lp>l1+l2: continue

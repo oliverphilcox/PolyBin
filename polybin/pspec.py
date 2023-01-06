@@ -16,24 +16,24 @@ class PSpec():
     - base: PolyBin class
     - mask: HEALPix mask to deconvolve
     - applySinv: function which returns S^-1 applied to a given input map
-    - min_l, dl, Nl: binning parameters
+    - l_bins: array of bin edges
     """
-    def __init__(self, base, mask, applySinv, min_l, dl, Nl):
+    def __init__(self, base, mask, applySinv, l_bins):
         # Read in attributes
         self.base = base
         self.mask = mask
         self.applySinv = applySinv
-        self.min_l = min_l
-        self.dl = dl
-        self.Nl = Nl
+        self.l_bins = l_bins
+        self.min_l = np.min(l_bins)
+        self.Nl = len(l_bins)-1
         self.beam_lm = self.base.beam_lm
         
-        if min_l+Nl*dl>base.lmax:
+        if np.max(self.l_bins)>base.lmax:
             raise Exception("Maximum l is larger than HEALPix resolution!")
-        print("Binning: %d bins in [%d, %d]"%(Nl,min_l,min_l+Nl*dl))
+        print("Binning: %d bins in [%d, %d]"%(self.Nl,self.min_l,np.max(self.l_bins)))
         
         # Define l filters
-        self.ell_bins = [(self.base.l_arr>=self.min_l+self.dl*bin1)&(self.base.l_arr<self.min_l+self.dl*(bin1+1)) for bin1 in range(self.Nl)]
+        self.ell_bins = [(self.base.l_arr>=self.l_bins[bin1])&(self.base.l_arr<self.l_bins[bin1+1]) for bin1 in range(self.Nl)]
         self.all_ell_bins = np.vstack(self.ell_bins)
         
         # Define m weights (for complex conjugates)
@@ -44,7 +44,7 @@ class PSpec():
         Return a list of the central ell values for each power spectrum bin.
         """
         # Iterate over bins
-        ls = [self.min_l+(bin1+0.5)*self.dl-0.5 for bin1 in range(self.Nl)]
+        ls = [0.5*(self.l_bins[bin1]+self.l_bins[bin1+1]) for bin1 in range(self.Nl)]
         return ls
 
     ### OPTIMAL ESTIMATOR

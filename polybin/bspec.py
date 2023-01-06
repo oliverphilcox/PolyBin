@@ -11,41 +11,46 @@ class BSpec():
     """Bispectrum estimation class. This takes the binning strategy as input and a base class. 
     We also feed in a function that applies the S^-1 operator in real space.
 
-    Note that we can additionally compute squeezed triangles by setting Nl_squeeze > Nl, giving a different lmax for short and long sides.
+    Note that we can additionally compute squeezed triangles by setting l_bins_squeeze, giving a different lmax for short and long sides.
     
     Inputs:
     - base: PolyBin class
     - mask: HEALPix mask to deconvolve
     - applySinv: function which returns S^-1 applied to a given input map
-    - min_l, dl, Nl: binning parameters
-    - Nl_squeeze: number of squeezed ell bins 
+    - l_bins: array of bin edges
+    - l_bins_squeeze: array of squeezed bin edges (optional)
     - include_partial_triangles: whether to include triangles whose centers don't satisfy the triangle conditions. (Default: False)
     """
-    def __init__(self, base, mask, applySinv, min_l, dl, Nl, Nl_squeeze=None, include_partial_triangles=False):
+    def __init__(self, base, mask, applySinv, l_bins, l_bins_squeeze=[], include_partial_triangles=False):
         # Read in attributes
         self.base = base
         self.mask = mask
         self.applySinv = applySinv
-        self.min_l = min_l
-        self.dl = dl
-        self.Nl = Nl
-        if Nl_squeeze!=None:
-            assert Nl_squeeze>=Nl, "Squeezed Nl must be at least as large as Nl!"
-            self.Nl_squeeze = Nl_squeeze
+        self.l_bins = l_bins
+        self.min_l = np.min(l_bins)
+        self.Nl = len(l_bins)-1
+
+        if len(l_bins_squeeze)>0:
+            self.l_bins_squeeze = l_bins_squeeze
+            self.Nl_squeeze = len(l_bins_squeeze)-1
+            for l_edge in self.l_bins:
+                assert l_edge in self.l_bins_squeeze, "Squeezed bins must contain all the unsqueezed bins!"
         else:
-            self.Nl_squeeze = Nl
+            self.l_bins_squeeze = self.l_bins.copy()
+            self.Nl_squeeze = self.Nl
+        
         self.include_partial_triangles = include_partial_triangles
         self.beam = self.base.beam
         self.beam_lm = self.base.beam_lm
         
-        if min_l+Nl*dl>base.lmax:
+        if np.max(self.l_bins_squeeze)>base.lmax:
             raise Exception("Maximum l is larger than HEALPix resolution!")
-        print("Binning: %d bins in [%d, %d]"%(Nl,min_l,min_l+Nl*dl))
+        print("Binning: %d bins in [%d, %d]"%(self.Nl,self.min_l,np.max(self.l_bins)))
         if self.Nl_squeeze!=self.Nl:
-            print("Squeezed binning: %d bins in [%d, %d]"%(Nl_squeeze,min_l,min_l+Nl_squeeze*dl))
+            print("Squeezed binning: %d bins in [%d, %d]"%(self.Nl_squeeze,self.min_l,np.max(self.l_bins_squeeze)))
         
         # Define l filters
-        self.ell_bins = [(self.base.l_arr>=self.min_l+self.dl*bin1)&(self.base.l_arr<self.min_l+self.dl*(bin1+1)) for bin1 in range(self.Nl_squeeze)]
+        self.ell_bins = [(self.base.l_arr>=self.l_bins_squeeze[bin1])&(self.base.l_arr<self.l_bins_squeeze[bin1+1]) for bin1 in range(self.Nl_squeeze)]
         
     def _check_bin(self, bin1, bin2, bin3):
         """Return one if modes in the bin satisfy the even-parity triangle conditions, or zero else.
@@ -54,9 +59,9 @@ class BSpec():
         """
         if self.include_partial_triangles:
             good = 0
-            for l1 in range(self.min_l+bin1*self.dl,self.min_l+(bin1+1)*self.dl):
-                for l2 in range(self.min_l+bin2*self.dl,self.min_l+(bin2+1)*self.dl):
-                    for l3 in range(self.min_l+bin3*self.dl,self.min_l+(bin3+1)*self.dl):
+            for l1 in range(self.l_bins[bin1],self.l_bins[bin1+1]):
+                for l2 in range(self.l_bins_squeeze[bin2],self.l_bins_squeeze[bin2+1]):
+                    for l3 in range(self.l_bins_squeeze[bin3],self.l_bins_squeeze[bin3+1]):
                         # skip any odd bins
                         if (-1)**(l1+l2+l3)==-1: continue 
                         if l1>=abs(l1-l2) and l3<=l1+l2:
@@ -68,9 +73,9 @@ class BSpec():
             else:
                 return 0
         else:
-            l1 = self.min_l+(bin1+0.5)*self.dl-0.5
-            l2 = self.min_l+(bin2+0.5)*self.dl-0.5
-            l3 = self.min_l+(bin3+0.5)*self.dl-0.5
+            l1 = 0.5*(self.l_bins[bin1]+self.l_bins[bin1+1])
+            l2 = 0.5*(self.l_bins_squeeze[bin2]+self.l_bins_squeeze[bin2+1])
+            l3 = 0.5*(self.l_bins_squeeze[bin3]+self.l_bins_squeeze[bin3+1])
             if l3<abs(l1-l2) or l3>l1+l2:
                 return 0
             else:
@@ -110,12 +115,13 @@ class BSpec():
         """
         # Iterate over bins
         l1s, l2s, l3s = [],[],[]
+
         for bin1 in range(self.Nl):
-            l1 = self.min_l+(bin1+0.5)*self.dl-0.5
+            l1 = 0.5*(self.l_bins[bin1]+self.l_bins[bin1+1])
             for bin2 in range(bin1,self.Nl_squeeze):
-                l2 = self.min_l+(bin2+0.5)*self.dl-0.5
+                l2 = 0.5*(self.l_bins_squeeze[bin2]+self.l_bins_squeeze[bin2+1])
                 for bin3 in range(bin2,self.Nl_squeeze):
-                    l3 = self.min_l+(bin3+0.5)*self.dl-0.5
+                    l3 = 0.5*(self.l_bins_squeeze[bin3]+self.l_bins_squeeze[bin3+1])
                 
                     # skip bins outside the triangle conditions
                     if not self._check_bin(bin1,bin2,bin3): continue
@@ -443,9 +449,9 @@ class BSpec():
                     value = 0.
 
                     # Now iterate over l values in bin
-                    for l1 in range(self.min_l+bin1*self.dl,self.min_l+(bin1+1)*self.dl):
-                        for l2 in range(self.min_l+bin2*self.dl,self.min_l+(bin2+1)*self.dl):
-                            for l3 in range(max([abs(l1-l2),self.min_l+bin3*self.dl]),min([l1+l2,self.min_l+(bin3+1)*self.dl])):
+                    for l1 in range(self.l_bins[bin1],self.l_bins[bin1+1]):
+                        for l2 in range(self.l_bins_squeeze[bin2],self.l_bins_squeeze[bin2+1]):
+                            for l3 in range(max([abs(l1-l2),self.l_bins_squeeze[bin3]]),min([l1+l2+1,self.l_bins_squeeze[bin3+1]])):
                                 
                                 if (-1)**(l1+l2+l3)==-1: continue # 3j = 0 here
                                 tj = self.base.tj0(l1,l2,l3)

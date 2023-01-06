@@ -15,3 +15,5 @@ nano *.ipynb
 *.txt'
 *.jl
 *.npz
+old/
+old/*
