@@ -993,11 +993,11 @@ class TSpec():
 
         # Return Fisher contributions
         if parity=='even':
-            return 0.5*fish_even
+            return fish_even
         elif parity=='odd':
-            return 0.5*fish_odd
+            return fish_odd
         else:
-            return 0.5*fish_both
+            return fish_both
         
     def compute_fisher(self, N_it, parity='even', N_cpus=1, verb=False):
         """
@@ -1463,7 +1463,6 @@ class TSpec():
                 
                 index1e = -1
                 index1o = -1
-                print("Using index %d"%index1e_input)
                 for bin1 in range(self.Nl):
                     for bin2 in range(bin1,self.Nl_squeeze):
                         for bin3 in range(bin1,self.Nl):
@@ -1651,7 +1650,7 @@ class TSpec():
         else:
             return fish_even, fish_odd
     
-    def Tl_ideal(self, data, fish_ideal=[], parity='even', verb=False, include_disconnected_term=True):
+    def Tl_ideal(self, data, fish_ideal=[], parity='even', verb=False, include_disconnected_term=True, N_cpus=1):
         """
         Compute the idealized trispectrum estimator, including normalization, if not supplied or already computed. Note that this normalizes by < mask^4 >.
         
@@ -1660,6 +1659,8 @@ class TSpec():
         Note that we return the imaginary part of the odd-parity trispectrum.
 
         We can also optionally switch off the disconnected terms. This only affects the parity-even trispectrum.
+        
+        The N_cpus parameter specifies how many CPUs to use in computation of the ideal Fisher matrix.
         """
         # Check type
         if parity not in ['even','odd','both']:
@@ -1684,7 +1685,7 @@ class TSpec():
         # Compute Fisher matrices, if not supplied
         if (parity!='odd' and not hasattr(self,'inv_fish_ideal_even')) or (parity!='even' and not hasattr(self,'inv_fish_ideal_odd')):
             print("Computing ideal Fisher matrix")
-            self.compute_fisher_ideal(parity=parity, verb=verb)
+            self.compute_fisher_ideal(parity=parity, verb=verb, N_cpus=N_cpus)
         else:
             print("Using precomputed Fisher matrix")
             

@@ -400,7 +400,7 @@ class BSpec():
         Cinv_data_lm = self.base.safe_divide(self.base.to_lm(data),self.base.Cl_lm)
         
         # Compute I maps
-        I_map = [self.base.to_map(self.ell_bins[bin1]/self.beam_lm*Cinv_data_lm) for bin1 in range(self.Nl_squeeze)]
+        I_map = [self.base.to_map(self.ell_bins[bin1]*self.beam_lm*Cinv_data_lm) for bin1 in range(self.Nl_squeeze)]
 
         # Compute symmetry factor, if not already present
         if not hasattr(self, 'sym_factor'):
@@ -455,7 +455,7 @@ class BSpec():
                                 
                                 if (-1)**(l1+l2+l3)==-1: continue # 3j = 0 here
                                 tj = self.base.tj0(l1,l2,l3)
-                                value += tj**2*(2.*l1+1.)*(2.*l2+1.)*(2.*l3+1.)/(4.*np.pi)/self.base.Cl[l1]/self.base.Cl[l2]/self.base.Cl[l3]
+                                value += tj**2*self.beam[l1]**2*self.beam[l2]**2*self.beam[l3]**2*(2.*l1+1.)*(2.*l2+1.)*(2.*l3+1.)/(4.*np.pi)/self.base.Cl[l1]/self.base.Cl[l2]/self.base.Cl[l3]
                                             
                     fish_diag[index] = value/self.sym_factor[index]
                     index += 1
