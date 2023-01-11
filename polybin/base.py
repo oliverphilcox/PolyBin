@@ -17,15 +17,23 @@ class PolyBin():
     - beam: Beam present in the signal maps. This will be set to unity if unspecified, else deconvolved out the signal.
     
     """
-    def __init__(self, Nside, Cl, beam=[]):
+    def __init__(self, Nside, Cl, beam=[], include_pixel_window=True):
         
         # Load attributes
         self.Nside = Nside
-        self.Cl = Cl
+        self.Cl = Cl.copy()
         if len(beam)==0:
-            self.beam = 1.+0.*Cl
+            self.beam = 1.+0.*self.Cl
         else:
-            self.beam = beam
+            self.beam = beam.copy()
+
+        # Account for pixel window if necessary
+        if include_pixel_window:
+            pixwin = healpy.pixwin(self.Nside)
+            self.beam *= pixwin
+            self.Cl *= pixwin**2
+        else:
+            print("## Caution: not accounting for pixel window function")
         
         # Derived parameters
         self.Npix = 12*Nside**2
