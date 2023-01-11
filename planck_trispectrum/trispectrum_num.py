@@ -22,13 +22,17 @@ lmax = 3*Nside-1
 N_it = 100 # Number of random iterations to compute 2- and 0-field terms
 
 # Binning parameters
-l_bins = np.load('l_bins_data.npy')
+l_bins = np.load('models/l_bins350.npy')
 l_bins_squeeze = l_bins.copy()
 L_bins = l_bins.copy()
 print("binned lmax: %d, HEALPix lmax: %d"%(np.max(l_bins_squeeze),lmax))
 
 # Whether to include bins only partially satisfying triangle conditions
 include_partial_triangles = False
+
+# Whether to include the pixel window function
+# This should be set to True, unless we generate maps at the same realization we analyze them!
+include_pixel_window = True
 
 # whether to add a separable reduced bispectrum to the input maps
 include_synthetic_b = False
@@ -49,19 +53,19 @@ beam_int = InterpolatedUnivariateSpline(np.arange(len(beam_dat)),beam_dat)
 beam = beam_int(l)*(l>=2)+(l<2)*1
 
 # Base class
-Sl_weighting = np.load('Sl_weighting.npy')
+Sl_weighting = np.load('planck/Sl_weighting.npy')
 assert len(Sl_weighting)==lmax+1
-base = pb.PolyBin(Nside, Sl_weighting, beam=beam)
+base = pb.PolyBin(Nside, Sl_weighting, beam=beam, include_pixel_window=include_pixel_window)
 
 # Galactic Mask (from 1905.05697, common T map, fsky = 77.9%)
 maskfile = 'COM_Mask_CMB-common-Mask-Int_2048_R3.00.fits'
 mask_fwhm = 10. # smoothing in arcminutes
 
 # Check if output exists
-outfile = outroot+'trispectrum_numerator%d_(%d,%d,%d).npy'%(sim_id,len(l_bins)-1,len(l_bins_squeeze)-1,len(L_bins)-1)
+outfile = outroot+'trispectrum_numerator%d_(%d,%d,%d).txt'%(sim_id,len(l_bins)-1,len(l_bins_squeeze)-1,len(L_bins)-1)
 
 if os.path.exists(outfile):
-    print("Trispectrum numerator already computed; exiting!")
+    print("Fisher matrix already computed; exiting!")
     sys.exit()
 
 ########################### LOAD DATA ###########################
@@ -191,5 +195,5 @@ start = time.time()
 numerator = tspec.Tl_numerator(data, parity='both', include_disconnected_term=True, verb=True)
 print("Computed trispectrum contribution after %.2f s"%(time.time()-start))
 
-np.save(outfile,numerator)
+np.savetxt(outfile,np.concatenate(numerator))
 print("Output saved to %s; exiting after %.2f seconds"%(outfile,time.time()-init))

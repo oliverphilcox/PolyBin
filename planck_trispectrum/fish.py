@@ -62,7 +62,7 @@ beam = 1.+0.*l
 
 # Load class with fiducial Cl and Nside (ensuring no zeros in Cl_th)
 # Note that Cl_th includes the beam here!
-base = pb.PolyBin(Nside, Sl, beam=beam)
+base = pb.PolyBin(Nside, Sl, beam=beam, include_pixel_weights=False)
 
 ## compute mask 
 mask = healpy.synfast(Sl,Nside)*0.+1.

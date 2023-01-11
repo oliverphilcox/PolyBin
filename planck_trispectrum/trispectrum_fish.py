@@ -19,13 +19,17 @@ Nside = 128
 lmax = 3*Nside-1
 
 # Binning parameters
-l_bins = np.load('l_bins_data.npy')
+l_bins = np.load('models/l_bins350.npy')
 l_bins_squeeze = l_bins.copy()
 L_bins = l_bins.copy()
 print("binned lmax: %d, HEALPix lmax: %d"%(np.max(l_bins_squeeze),lmax))
 
 # Whether to include bins only partially satisfying triangle conditions
 include_partial_triangles = False
+
+# Whether to include the pixel window function
+# This should be set to True, unless we generate maps at the same realization we analyze them!
+include_pixel_window = True
 
 # whether to add a separable reduced bispectrum to the input maps
 include_synthetic_b = False
@@ -42,9 +46,9 @@ beam_int = InterpolatedUnivariateSpline(np.arange(len(beam_dat)),beam_dat)
 beam = beam_int(l)*(l>=2)+(l<2)*1
 
 # Base class
-Sl_weighting = np.load('Sl_weighting.npy')
+Sl_weighting = np.load('planck/Sl_weighting.npy')
 assert len(Sl_weighting)==lmax+1
-base = pb.PolyBin(Nside, Sl_weighting, beam=beam)
+base = pb.PolyBin(Nside, Sl_weighting, beam=beam, include_pixel_window=include_pixel_window)
 
 # Galactic Mask (from 1905.05697, common T map, fsky = 77.9%)
 maskfile = 'COM_Mask_CMB-common-Mask-Int_2048_R3.00.fits'
