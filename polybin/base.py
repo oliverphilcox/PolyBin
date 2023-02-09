@@ -15,7 +15,8 @@ class PolyBin():
     - Nside: HEALPix Nside
     - Cl: Fiducial power spectrum (including beam and noise). This is used for creating synthetic maps for the optimal estimators, and, optionally, generating GRFs to test on.
     - beam: Beam present in the signal maps. This will be set to unity if unspecified, else deconvolved out the signal.
-    
+    - include_pixel_window: Whether to account for the HEALPix pixel window function (usually true, unless data is generated at low Nside).
+
     """
     def __init__(self, Nside, Cl, beam=[], include_pixel_window=True):
         
