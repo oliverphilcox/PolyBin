@@ -10,7 +10,7 @@ PolyBin contains the following modules:
 
 Extension to cross-spectra and fields with non-zero spin, such as polarization, is, in principle, straightforward.
 
-For usage details, see the [Tutorial](Tutorial.ipynb). In the [planck_trispectrum](planck_trispectrum/) directory, we present details from the analysis of the Planck parity-odd trispectrum in [Philcox 2023](https://arxiv.org/abs/2301.XXXXX).
+For usage details, see the [Tutorial](Tutorial.ipynb). 
 
 ### Authors
 - [Oliver Philcox](mailto:ohep2@cantab.ac.uk) (Columbia / Simons Foundation)
@@ -21,4 +21,3 @@ For usage details, see the [Tutorial](Tutorial.ipynb). In the [planck_trispectru
 
 ### References
 1. Philcox, O. H. E., "Optimal Estimation of the Binned Mask-Free Power Spectrum, Bispectrum, and Trispectrum on the Full Sky", (in prep.) ([arXiv](https://arxiv.org/abs/2301.XXXXX))
-2. Philcox, O. H. E., "Do the CMB Temperature Fluctuations Conserve Parity?", (in prep.) ([arXiv](https://arxiv.org/abs/2301.XXXXX))

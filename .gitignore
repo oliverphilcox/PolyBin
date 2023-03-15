@@ -22,3 +22,4 @@ nano *.ipynb
 old/
 old/*
 *__pycache__*
+README-tmp.md
