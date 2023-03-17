@@ -20,4 +20,4 @@ For usage details, see the [Tutorial](Tutorial.ipynb).
 - healpy, pywigxjpf, fitsio, tqdm (pip installable)
 
 ### References
-1. Philcox, O. H. E., "Optimal Estimation of the Binned Mask-Free Power Spectrum, Bispectrum, and Trispectrum on the Full Sky", (in prep.) ([arXiv](http://arxiv.org/abs/2303.08828))
+1. Philcox, O. H. E., "Optimal Estimation of the Binned Mask-Free Power Spectrum, Bispectrum, and Trispectrum on the Full Sky", (2023) ([arXiv](http://arxiv.org/abs/2303.08828))
