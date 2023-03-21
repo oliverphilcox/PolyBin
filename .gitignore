@@ -9,8 +9,6 @@ testing/*
 *.png
 planck
 planck/*
-planck_public/*
-planck_public
 planck_trispectrum/*
 planck_trispectrum
 models/*
