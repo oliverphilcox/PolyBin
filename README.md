@@ -12,7 +12,7 @@ Extension to cross-spectra and fields with non-zero spin, such as polarization, 
 
 For usage details, see the [Tutorial](Tutorial.ipynb). 
 
-In the [planck_public] directory, we include measurements and analysis of the Planck parity-odd temperature trispectrum, as in [Philcox 2023b](https://arxiv.org/abs/2301.XXXXX).
+In the [planck](planck_public/) directory, we include measurements and analysis of the Planck parity-odd temperature trispectrum, as in [Philcox 2023b](https://arxiv.org/abs/2301.XXXXX).
 
 ### Authors
 - [Oliver Philcox](mailto:ohep2@cantab.ac.uk) (Columbia / Simons Foundation)
