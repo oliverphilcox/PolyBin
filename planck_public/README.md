@@ -1,6 +1,6 @@
 # Planck Parity-Odd Trispectrum
 
-This directory contains code and analysis products for the measurement of the large-scale parity-odd Planck temperature trispectrum in [Philcox 2023](https://arxiv.org/2301.XXXXX). In particular, we give code for computing spectra from Planck data (including mask and weighting definitions), computing theoretical templates, and performing the analysis. Note that most routines should be run on a cluster. 
+This directory contains code and analysis products for the measurement of the large-scale parity-odd Planck temperature trispectrum in [Philcox 2023b](https://arxiv.org/abs/2303.12106). In particular, we give code for computing spectra from Planck data (including mask and weighting definitions), computing theoretical templates, and performing the analysis. Note that most routines should be run on a cluster. 
 
 ## Data
 - ```trispectrum_num.py```: Compute the trispectrum numerator for Planck data or FFP10 simulations.
