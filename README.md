@@ -13,7 +13,7 @@ Extension to cross-spectra and fields with non-zero spin, such as polarization, 
 
 For usage details, see the [Tutorial](Tutorial.ipynb). 
 
-In the [planck](planck_public/) directory, we include measurements and analysis of the Planck parity-odd temperature trispectrum, as in [Philcox 2023b](https://arxiv.org/abs/2301.XXXXX).
+In the [planck](planck_public/) directory, we include measurements and analysis of the Planck parity-odd temperature trispectrum, as in [Philcox 2023b](https://arxiv.org/abs/2303.12106).
 
 ### Authors
 - [Oliver Philcox](mailto:ohep2@cantab.ac.uk) (Columbia / Simons Foundation)
@@ -24,5 +24,5 @@ In the [planck](planck_public/) directory, we include measurements and analysis 
 
 ### References
 1. Philcox, O. H. E., "Optimal Estimation of the Binned Mask-Free Power Spectrum, Bispectrum, and Trispectrum on the Full Sky", (2023) ([arXiv](https://arxiv.org/abs/2303.08828))
-2. Philcox, O. H. E., "Do the CMB Temperature Fluctuations Conserve Parity?", (in prep.) ([arXiv](https://arxiv.org/abs/2303.XXXXX))
+2. Philcox, O. H. E., "Do the CMB Temperature Fluctuations Conserve Parity?", (2023) ([arXiv](https://arxiv.org/abs/2303.12106))
 
