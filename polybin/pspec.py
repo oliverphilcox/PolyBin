@@ -1,7 +1,6 @@
 ### Code for ideal and unwindowed binned polyspectrum estimation on the full-sky. Author: Oliver Philcox (2022)
 ## This module contains the power spectrum estimation code
 
-import healpy
 import numpy as np
 import multiprocessing as mp
 import tqdm
@@ -10,7 +9,7 @@ import pywigxjpf as wig
 
 class PSpec():
     """Power spectrum estimation class. This takes the binning strategy as input and a base class. 
-    We also feed in a function that applies the S^-1 operator in real space.
+    We also feed in a function that applies the S^-1 operator in real space. 
     
     Inputs:
     - base: PolyBin class
@@ -18,7 +17,7 @@ class PSpec():
     - applySinv: function which returns S^-1 applied to a given input map
     - l_bins: array of bin edges
     """
-    def __init__(self, base, mask, applySinv, l_bins):
+    def __init__(self, base, mask, applySinv, l_bins, fields=['TT','TE','TB','EE','EB','EE']):
         # Read in attributes
         self.base = base
         self.mask = mask
@@ -26,11 +25,23 @@ class PSpec():
         self.l_bins = l_bins
         self.min_l = np.min(l_bins)
         self.Nl = len(l_bins)-1
+        self.pol = self.base.pol
         self.beam_lm = self.base.beam_lm
+        self.fields = fields
         
+        # Check correct fields are being used
+        for f in fields:
+            assert f in ['TT','TE','TB','EE','EB','BB'], "Unknown field '%s' supplied!"%f 
+        assert len(fields)==len(np.unique(fields))
+        
+        if not self.pol and fields!=['TT']:
+            print("## Polarization mode not turned on; setting fields to TT only!")
+            fields = ['TT']
+
         if np.max(self.l_bins)>base.lmax:
             raise Exception("Maximum l is larger than HEALPix resolution!")
         print("Binning: %d bins in [%d, %d]"%(self.Nl,self.min_l,np.max(self.l_bins)))
+        print("Fields: %s"%fields)
         
         # Define l filters
         self.ell_bins = [(self.base.l_arr>=self.l_bins[bin1])&(self.base.l_arr<self.l_bins[bin1+1]) for bin1 in range(self.Nl)]
@@ -38,6 +49,14 @@ class PSpec():
         
         # Define m weights (for complex conjugates)
         self.m_weight = (1.+1.*(self.base.m_arr>0.))
+        
+        # Check if window is uniform
+        if np.std(self.mask)<1e-12 and np.abs(np.mean(self.mask)-1)<1e-12:
+            print("Mask: ones")
+            self.ones_mask = True
+        else:
+            print("Mask: spatially varying")
+            self.ones_mask = False
  
     def get_ells(self):
         """
@@ -51,55 +70,121 @@ class PSpec():
     def Cl_numerator(self, data):
         """Compute the numerator of the unwindowed power spectrum estimator.
         """
+
         # Apply W * S^-1 to data and transform to harmonic space
-        Wh_data_lm = self.base.to_lm(self.mask*self.applySinv(data))
+        if self.ones_mask:
+            Wh_data_lm = self.applySinv(data, input_type='map', output_type='harmonic')
+        else:
+            Wh_data_lm = self.base.to_lm(self.mask*self.applySinv(data))
 
         # Compute numerator (including beam)
-        Cl_num = 0.5*np.real(np.sum(self.m_weight*Wh_data_lm*np.conj(Wh_data_lm)*self.all_ell_bins*self.beam_lm**2,axis=1))
+        if not self.pol:
+            Cl_num = 0.5*np.real(np.sum(self.m_weight*Wh_data_lm*np.conj(Wh_data_lm)*self.all_ell_bins*self.beam_lm**2,axis=1))
+        else:
+            Cl_num = []
+            for u in self.fields:
+                u1, u2 = self.base.indices[u[0]], self.base.indices[u[1]]
+                
+                Delta2_u = (u1==u2)+1.
+                
+                # Compute quadratic product of data matrices
+                spec_squared = np.conj(Wh_data_lm[u1])*Wh_data_lm[u2]
+                
+                # Compute full numerator
+                Cl_u1u2 = 1./Delta2_u*np.sum(self.m_weight*spec_squared*self.all_ell_bins*self.beam_lm**2,axis=1)
+                
+                Cl_num.append(np.real(Cl_u1u2))
 
-        return Cl_num
+        return np.asarray(Cl_num)
     
-    def compute_fisher_contribution(self, seed):
+    def compute_fisher_contribution(self, seed, verb=False):
         """This computes the contribution to the Fisher matrix from a single GRF simulation, created internally."""
-        
+
         # Initialize output
-        fish = np.zeros((self.Nl,self.Nl))
-        
-        # Compute random realization with known power spectrum
-        u = self.base.generate_data(seed=seed+int(1e7))
+        fish = np.zeros((self.Nl*len(self.fields),self.Nl*len(self.fields)))
 
-        # Compute weighted fields
-        Sinv_u = self.applySinv(u)
-        Uinv_u = self.base.applyUinv(u)
+        # Compute random realization with known power spectrum and filter
+        if self.ones_mask:
+            a_lm = self.base.generate_data(seed=seed+int(1e7), output_type='harmonic')
+            WSinv_a_lm = self.applySinv(a_lm, input_type='harmonic', output_type='harmonic')
+            WAinv_a_lm = self.applySinv(a_lm, input_type='harmonic', output_type='harmonic')
+        else:
+            a = self.base.generate_data(seed=seed+int(1e7))
+            WSinv_a_lm = self.base.to_lm(self.mask*self.applySinv(a))
+            WAinv_a_lm = self.base.to_lm(self.mask*self.base.applyAinv(a))
 
-        # Compute Q_b fields, including S^-1 weighting
-        WSinv_u_lm = self.base.to_lm(self.mask*Sinv_u)
-        WUinv_u_lm = self.base.to_lm(self.mask*Uinv_u)
-        Sinv_Q_b_Uinv_u = [self.applySinv(self.base.to_map(WUinv_u_lm*self.ell_bins[bin1]*self.beam_lm**2)*self.mask) for bin1 in range(self.Nl)]
-        Q_b_Sinv_u = [self.base.to_map(WSinv_u_lm*self.ell_bins[bin1]*self.beam_lm**2)*self.mask for bin1 in range(self.Nl)]
+        ## SCALAR
+        if not self.pol:
+            if verb: print("Seed %d: creating Q filter"%(seed))
+
+            # Filter and transform to map space
+            if self.ones_mask:
+                Sinv_Q_b_Ainv_a = [self.applySinv(WAinv_a_lm*self.ell_bins[bin1]*self.beam_lm**2,input_type='harmonic',output_type='harmonic') for bin1 in range(self.Nl)]
+                Q_b_Sinv_a = [WSinv_a_lm*self.ell_bins[bin1]*self.beam_lm**2 for bin1 in range(self.Nl)]
+            else:
+                Sinv_Q_b_Ainv_a = [self.applySinv(self.mask*self.base.to_map(WAinv_a_lm*self.ell_bins[bin1]*self.beam_lm**2)) for bin1 in range(self.Nl)]
+                Q_b_Sinv_a = [self.mask*self.base.to_map(WSinv_a_lm*self.ell_bins[bin1]*self.beam_lm**2) for bin1 in range(self.Nl)]
+
+        ## TENSOR
+        else:
+
+            Sinv_Q_b_Ainv_a, Q_b_Sinv_a = [],[]
+
+            for u in self.fields:
+                if verb: print("Seed %d: creating Q filter for %s"%(seed,u))
+                u1, u2 = self.base.indices[u[0]], self.base.indices[u[1]]
+
+                Delta2_u = (u1==u2)+1.
+
+                # Compute T/E/B field
+                WSinv_a_lm_u, WAinv_a_lm_u = [np.zeros_like(WSinv_a_lm) for _ in range(2)]
+                for f in range(3):
+                    WSinv_a_lm_u[f] = WSinv_a_lm[u2]*(u1==f)+WSinv_a_lm[u1]*(u2==f)
+                    WAinv_a_lm_u[f] = WAinv_a_lm[u2]*(u1==f)+WAinv_a_lm[u1]*(u2==f)
+
+                # Filter and transform to map space
+                for bin1 in range(self.Nl):
+                    if self.ones_mask:
+                       # Easier to store harmonic maps in this case
+                        Sinv_Q_b_Ainv_a.append(self.applySinv(WAinv_a_lm_u*self.ell_bins[bin1]*self.beam_lm**2/Delta2_u,input_type='harmonic',output_type='harmonic'))
+                        Q_b_Sinv_a.append(WSinv_a_lm_u*self.ell_bins[bin1]*self.beam_lm**2/Delta2_u)
+                    else:
+                       # Easier to store real-space maps in this case
+                        Sinv_Q_b_Ainv_a.append(self.applySinv(self.mask*self.base.to_map(WAinv_a_lm_u*self.ell_bins[bin1]*self.beam_lm**2/Delta2_u)))
+                        Q_b_Sinv_a.append(self.mask*self.base.to_map(WSinv_a_lm_u*self.ell_bins[bin1]*self.beam_lm**2/Delta2_u))
 
         # Compute the Fisher matrix
-        for bin1 in range(self.Nl):
-            for bin2 in range(self.Nl):
-                fish[bin1,bin2] = 0.5*np.real(self.base.A_pix*np.sum(Q_b_Sinv_u[bin1]*Sinv_Q_b_Uinv_u[bin2]))
+        if verb: print("Seed %d: assembling Fisher matrix"%seed)
+        if self.ones_mask:
+            fish = 0.5*np.real(np.einsum('ajk,bjk->ab',self.m_weight*np.asarray(Q_b_Sinv_a).conj(),np.asarray(Sinv_Q_b_Ainv_a))) # harmonic space sum
+        else:
+            fish = 0.5*np.real(np.einsum('ajk,bjk->ab',self.base.A_pix*np.asarray(Q_b_Sinv_a).conj(),np.asarray(Sinv_Q_b_Ainv_a))) # real-space sum
         
+#         for i1 in range(self.Nl*len(self.fields)):
+#             for i2 in range(self.Nl*len(self.fields)):
+#                 if self.ones_mask:
+                    
+#                     fish[i1,i2] = 0.5*np.real(np.sum(self.m_weight*Q_b_Sinv_a[i1].conj()*Sinv_Q_b_Ainv_a[i2])) # harmonic space
+#                 else:
+#                     fish[i1,i2] = 0.5*np.real(self.base.A_pix*np.sum(Q_b_Sinv_a[i1].conj()*Sinv_Q_b_Ainv_a[i2])) # real-space
+
         # Return matrix
         return fish
     
-    def compute_fisher(self, N_it, N_cpus=1):
+    def compute_fisher(self, N_it, N_cpus=1, verb=False):
         """Compute the Fisher matrix using N_it realizations. If N_cpus > 1, this parallelizes the operations."""
 
         # Initialize output
-        fish = np.zeros((self.Nl,self.Nl))
+        fish = np.zeros((self.Nl*len(self.fields),self.Nl*len(self.fields)))
 
         global _iterable
         def _iterable(seed):
-            return self.compute_fisher_contribution(seed)
+            return self.compute_fisher_contribution(seed, verb=verb)
         
         if N_cpus==1:
             for seed in range(N_it):
                 if seed%5==0: print("Computing Fisher contribution %d of %d"%(seed+1,N_it))
-                fish += self.compute_fisher_contribution(seed)/N_it
+                fish += self.compute_fisher_contribution(seed, verb=verb)/N_it
         else:
             p = mp.Pool(N_cpus)
             print("Computing Fisher contribution from %d Monte Carlo simulations on %d threads"%(N_it, N_cpus))
@@ -122,50 +207,113 @@ class PSpec():
         
         # Compute numerator
         Cl_num = self.Cl_numerator(data)
-        
-        # Apply normalization
+        if self.pol: Cl_num = np.concatenate(Cl_num)
+
+        # Apply normalization and restructure
         Cl_out = np.matmul(self.inv_fish,Cl_num)
-        
+        Cl_out = [Cl_out[i*self.Nl:(i+1)*self.Nl] for i in range(len(self.fields))]
+
         return Cl_out
        
     ### IDEAL ESTIMATOR
     def Cl_numerator_ideal(self, data):
-        """Compute the numerator of the idealized power spectrum estimator. We normalize by < mask^2 >.
+        """Compute the numerator of the idealized power spectrum estimator for all fields of interest. We normalize by < mask^2 >.
         """
-        # Normalize data by C_th and transform to harmonic space
-        Cinv_data_lm = self.base.safe_divide(self.base.to_lm(data),self.base.Cl_lm)
+        # Transform to harmonic space
+        data_lm = self.base.to_lm(data)
+        
+        # Scalar case
+        if not self.pol:
+            # Normalize data by 1/C_th
+            Cinv_data_lm = self.base.safe_divide(data_lm[0],self.base.Cl_lm[0])
 
-        # Compute numerator
-        Cl_num = 0.5*np.real(np.sum(self.m_weight*Cinv_data_lm*np.conj(Cinv_data_lm)*self.all_ell_bins*self.beam_lm**2,axis=1))/np.mean(self.mask**2)
+            # Compute numerator (including beam)
+            Cl_num = 0.5*np.real(np.sum(self.m_weight*Cinv_data_lm*np.conj(Cinv_data_lm)*self.all_ell_bins*self.beam_lm**2,axis=1))/np.mean(self.mask**2)
+            
+        # Tensor case
+        else:
+            # Normalize by C_th^-1
+            Cinv_data_lm = np.einsum('ijk,jk->ik',self.base.inv_Cl_lm_mat,data_lm,order='C')
+                        
+            # Compute numerator (including beam)
+            Cl_num = []
+            for u in self.fields:
+                u1, u2 = self.base.indices[u[0]], self.base.indices[u[1]]
+                
+                Delta2_u = (u1==u2)+1.
+                
+                # Compute quadratic product of data matrices
+                spec_squared = np.conj(Cinv_data_lm[u1])*Cinv_data_lm[u2]
+                
+                # Compute full numerator
+                Cl_u1u2 = 1./Delta2_u*np.sum(self.m_weight*spec_squared*self.all_ell_bins*self.beam_lm**2,axis=1)/np.mean(self.mask**2)
+                
+                Cl_num.append(np.real(Cl_u1u2))
 
-        return Cl_num
+        return np.asarray(Cl_num)
                 
     def compute_fisher_ideal(self):
         """This computes the idealized Fisher matrix for the power spectrum."""
         
-        # Compute normalization
-        fish_diag = 0.5*np.sum(self.base.safe_divide(self.m_weight,self.base.Cl_lm**2)*self.all_ell_bins*self.beam_lm**4,axis=1)
-        fish = np.diag(fish_diag)
-        self.fish_ideal = fish
-        self.inv_fish_ideal = np.diag(1./fish_diag)
+        # Scalar case
+        if not self.pol:
+
+            # Compute normalization
+            fish_diag = 0.5*np.sum(self.base.safe_divide(self.m_weight,self.base.Cl_lm[0]**2)*self.all_ell_bins*self.beam_lm**4,axis=1)
+            fish = np.diag(fish_diag)
+            self.fish_ideal = fish
+            self.inv_fish_ideal = np.diag(1./fish_diag)
+        
+        # Tensor case
+        else:
+            
+            # Define output array
+            fish = np.zeros((len(self.fields)*self.Nl,len(self.fields)*self.Nl))
+            
+            # Iterate over fields
+            for i,u in enumerate(self.fields):
+                
+                u1, u2 = self.base.indices[u[0]], self.base.indices[u[1]]
+                Delta2_u = (u1==u2)+1.
+                
+                for j,u_p in enumerate(self.fields):
+                
+                    u1_p, u2_p = self.base.indices[u_p[0]], self.base.indices[u_p[1]]
+                    Delta2_u_p = (u1_p==u2_p)+1.
+                
+                    # Compute product of two inverse covariances with permutations
+                    inv_cov_sq = self.base.inv_Cl_lm_mat[u2_p,u1]*self.base.inv_Cl_lm_mat[u2,u1_p]
+                    inv_cov_sq += self.base.inv_Cl_lm_mat[u2_p,u2]*self.base.inv_Cl_lm_mat[u1,u1_p]
+                    
+                    # Assemble fisher matrix
+                    fish_diag = 1./(Delta2_u*Delta2_u_p)*np.sum(self.m_weight*inv_cov_sq*self.all_ell_bins*self.beam_lm**4,axis=1)
+                    
+                    # Add to output array
+                    fish[i*self.Nl:(i+1)*self.Nl,j*self.Nl:(j+1)*self.Nl] = np.diag(np.real(fish_diag))
+            
+            self.fish_ideal = fish
+            self.inv_fish_ideal = np.linalg.inv(self.fish_ideal)
         
         return fish
     
     def Cl_ideal(self, data, fish_ideal=[]):
-        """Compute the idealized power spectrum estimator, including normalization, if not supplied or already computed. Note that this normalizes by < mask^2 >."""
-        
+        """Compute the idealized power spectrum estimator, including normalization, if not supplied or already computed. Note that this normalizes by < mask^2 >.
+        """
+
         if len(fish_ideal)!=0:
             self.fish_ideal = fish_ideal
             self.inv_fish_ideal = np.linalg.inv(fish_ideal)
-        
+
         if not hasattr(self,'inv_fish_ideal'):
             print("Computing ideal Fisher matrix")
             self.compute_fisher_ideal()
-            
+
         # Compute numerator
         Cl_num_ideal = self.Cl_numerator_ideal(data)
-        
-        # Apply normalization
+        if self.pol: Cl_num_ideal = np.concatenate(Cl_num_ideal)
+
+        # Apply normalization and restructure
         Cl_out = np.matmul(self.inv_fish_ideal,Cl_num_ideal)
+        Cl_out = [Cl_out[i*self.Nl:(i+1)*self.Nl] for i in range(len(self.fields))]
         
         return Cl_out

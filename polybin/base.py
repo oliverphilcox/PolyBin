@@ -1,10 +1,9 @@
 ### Code for ideal and unwindowed binned polyspectrum estimation on the full-sky. Author: Oliver Philcox (2022)
 ## This module contains the basic code
 
-import healpy
 import numpy as np
 import multiprocessing as mp
-import tqdm
+import tqdm, healpy
 from scipy.interpolate import InterpolatedUnivariateSpline
 import pywigxjpf as wig
 
@@ -13,26 +12,44 @@ class PolyBin():
     
     Inputs:
     - Nside: HEALPix Nside
-    - Cl: Fiducial power spectrum (including beam and noise). This is used for creating synthetic maps for the optimal estimators, and, optionally, generating GRFs to test on.
+    - Cl: Fiducial power spectra (including beam and noise). This is used for creating synthetic maps for the optimal estimators, and, optionally, generating GRFs to test on.
     - beam: Beam present in the signal maps. This will be set to unity if unspecified, else deconvolved out the signal.
     - include_pixel_window: Whether to account for the HEALPix pixel window function (usually true, unless data is generated at low Nside).
-
+    - pol: Whether to include spin-2 fields in the computations. If true, Cl should be a list of six spectra: [ClTT, ClTE, ClTB, ClEE, ClEB, ClBB]. If false, Cl contains only ClTT.
+    - backend: Which backend to use to compute spherical harmonic transforms. Options: "healpix" [requires healpy] or "libsharp" [requires pixell].   
     """
-    def __init__(self, Nside, Cl, beam=[], include_pixel_window=True):
+    def __init__(self, Nside, Cl, beam=[], include_pixel_window=True, pol=True, backend='libsharp'):
         
         # Load attributes
         self.Nside = Nside
+        self.pol = pol
         self.Cl = Cl.copy()
+        self.backend = backend
+        if self.pol:
+            assert len(Cl)==6, "Must specify six input spectra: {ClTT, ClTE, ClTB, ClEE, ClEB, ClBB}"
+            self.Cl = Cl.copy()
+            self.n_Cl = 6
+        else:
+            if len(Cl)!=1:
+                self.Cl = [Cl]
+            else:
+                self.Cl = Cl.copy()
+            self.n_Cl = 1
         if len(beam)==0:
-            self.beam = 1.+0.*self.Cl
+            self.beam = 1.+0.*self.Cl[0]
         else:
             self.beam = beam.copy()
+        
+        # Define indices for T, E, B and their parities
+        self.indices = {'T':0,'E':1,'B':2}
+        self.parities = {'T':1,'E':1,'B':-1}
 
         # Account for pixel window if necessary
         if include_pixel_window:
+            print("Pixel windows can be different for polarization??")
             pixwin = healpy.pixwin(self.Nside)
             self.beam *= pixwin
-            self.Cl *= pixwin**2
+            self.Cl = [self.Cl[i]*pixwin**2 for i in range(self.n_Cl)]
         else:
             print("## Caution: not accounting for pixel window function")
         
@@ -42,21 +59,46 @@ class PolyBin():
         self.lmax = 3*self.Nside-1
         self.l_arr,self.m_arr = healpy.Alm.getlm(self.lmax)
         
+        # Set up relevant SHT modules
+        if self.backend=='libsharp':
+            from pixell import sharp
+            map_info = sharp.map_info_healpix(self.Nside)
+            alm_info = sharp.alm_info(self.lmax)
+            self.sht_func = sharp.sht(map_info,alm_info)
+        elif self.backend=='healpix':
+            pass
+        else:
+            raise Exception("Only 'healpix' and 'libsharp' backends are currently implemented!")
+        
         # Apply Cl and beam to grid (including beam and noise)
         ls = np.arange(self.lmax+1)
-        self.Cl_lm = InterpolatedUnivariateSpline(ls, self.Cl)(self.l_arr)
+        self.Cl_lm = [InterpolatedUnivariateSpline(ls, self.Cl[i])(self.l_arr) for i in range(self.n_Cl)]
         self.beam_lm = InterpolatedUnivariateSpline(ls, self.beam)(self.l_arr)
 
-        if (self.Cl==0).sum()>0:
-            print("## Caution: Zeros detected in input Cl - this may cause problems for inversion!")
+        for i in [0,3,5]:
+            if not self.pol and i>0: continue
+            if (self.Cl[i]==0).sum()>0:
+                print("## Caution: Zeros detected in (auto) input Cl - this may cause problems for inversion!")
         if (self.beam==0).sum()>0:
             print("## Caution: Zeros detected in input beam - this may cause problems for inversion!")
         for i in range(self.lmax+1):
-            if self.Cl[i]==0:
-                self.Cl_lm[self.l_arr==i] = 0.
-            if self.beam[i]==0:
-                self.beam_lm[self.l_arr==i] = 0.
-                
+            for f in range(self.n_Cl):
+                if self.Cl[f][i]==0: self.Cl_lm[f][self.l_arr==i] = 0.
+            if self.beam[i]==0: self.beam_lm[self.l_arr==i] = 0.
+                    
+        # Define C^-1 matrix
+        if self.pol:
+            # Compute full matrix of C^XY_lm
+            Cl_lm_mat = np.moveaxis(np.asarray([[self.Cl_lm[0],self.Cl_lm[1],self.Cl_lm[2]],
+                                                [self.Cl_lm[1],self.Cl_lm[3],self.Cl_lm[4]],
+                                                [self.Cl_lm[2],self.Cl_lm[4],self.Cl_lm[5]]]),[2,1,0],[0,2,1])
+            
+            # Check that matrix is well-posed 
+            assert (np.linalg.det(Cl_lm_mat)>0).all(), "Determinant of Cl^{XY} matrix is <= 0; are the input power spectra set correctly?"
+            
+            # Invert matrix for each l,m
+            self.inv_Cl_lm_mat = np.moveaxis(np.linalg.inv(Cl_lm_mat),[0,1,2],[2,0,1])
+                    
         # Define 3j calculation
         wig.wig_table_init(self.lmax*2,9)
         wig.wig_temp_init(self.lmax*2)
@@ -64,13 +106,39 @@ class PolyBin():
 
     # Basic harmonic transform functions
     def to_lm(self, input_map):
-        """Convert from map-space to harmonic-space"""
-        return healpy.map2alm(input_map,pol=False)
+        """Convert from map-space to harmonic-space. If three fields are supplied, this transforms TQU -> TEB.
         
+        This uses either HEALPix or Libsharp, depending on the backend chosen."""
+        if self.backend=='healpix':
+            if len(input_map)==3:
+                return healpy.map2alm(input_map, pol=True, iter=0) # no iteration, to match Libsharp
+            else:
+                return [healpy.map2alm(input_map[0], pol=False, iter=0)]
+        elif self.backend=='libsharp':
+            if len(input_map)==3:
+                T_lm = self.sht_func.map2alm([input_map[0]])
+                E_lm,B_lm = self.sht_func.map2alm(input_map[1:],spin=2)
+                return np.asarray([T_lm.ravel(),E_lm,B_lm])
+            else:
+                return [self.sht_func.map2alm(input_map[0])]
+            
     def to_map(self, input_lm):
-        """Convert from harmonic-space to map-space"""
-        return healpy.alm2map(input_lm,self.Nside,pol=False)
-
+        """Convert from harmonic-space to map-space. If three fields are supplied, this transforms TEB -> TQU.
+        
+        This uses either HEALPix or Libsharp, depending on the backend chosen."""
+        if self.backend=='healpix':
+            if len(input_lm)==3:
+                return healpy.alm2map(input_lm, self.Nside, pol=True)
+            else:
+                return [healpy.alm2map(input_lm[0], self.Nside, pol=False)]
+        elif self.backend=='libsharp':
+            if len(input_lm)==3:
+                T = self.sht_func.alm2map([input_lm[0]])
+                Q,U = self.sht_func.alm2map(input_lm[1:],spin=2)
+                return np.asarray([T.ravel(),Q,U])
+            else:
+                return [self.sht_func.alm2map(input_lm[0])]
+            
     def to_lm_spin(self, input_map_plus, input_map_minus, spin):
         """Convert (+-s)A from map-space to harmonic-space, weighting by (+-s)Y_{lm}. Our convention definitions follow HEALPix.
         
@@ -81,16 +149,19 @@ class PolyBin():
         
         # Define inputs
         map_inputs = [np.real((input_map_plus+input_map_minus)/2.), np.real((input_map_plus-input_map_minus)/(2.0j))]
-        
+
         # Perform transformation
-        lm_outputs = healpy.map2alm_spin(map_inputs,spin,self.lmax)
+        if self.backend=='healpix':
+            lm_outputs = healpy.map2alm_spin(map_inputs,spin,self.lmax)
+        elif self.backend=='libsharp':
+            lm_outputs = self.sht_func.map2alm(map_inputs,spin=spin)
         
         # Reconstruct output
         lm_plus = -(lm_outputs[0]+1.0j*lm_outputs[1])
         lm_minus = -1*(-1)**spin*(lm_outputs[0]-1.0j*lm_outputs[1])
         
         return lm_plus, lm_minus
-
+    
     def to_map_spin(self, input_lm_plus, input_lm_minus, spin):
         """Convert (+-s)A_lm from harmonic-space to map-space, weighting by (+-s)Y_{lm}. Our convention definitions follow HEALPix.
         
@@ -103,7 +174,10 @@ class PolyBin():
         lm_inputs = [-(input_lm_plus+(-1)**spin*input_lm_minus)/2.,-(input_lm_plus-(-1)**spin*input_lm_minus)/(2.0j)]
         
         # Perform transformation
-        map_outputs = healpy.alm2map_spin(lm_inputs,self.Nside,spin,self.lmax)
+        if self.backend=='healpix':
+            map_outputs = healpy.alm2map_spin(lm_inputs,self.Nside,spin,self.lmax)
+        elif self.backend=='libsharp':
+            map_outputs = self.sht_func.alm2map(lm_inputs,spin=spin)
         
         # Reconstruct output
         map_plus = map_outputs[0]+1.0j*map_outputs[1]
@@ -117,15 +191,19 @@ class PolyBin():
         out[y!=0] = x[y!=0]/y[y!=0]
         return out
 
-    def generate_data(self, seed=None, Cl_input=[], b_input=None, add_B=False, remove_mean=True):
-        """Generate a cmb map with a given C_ell and (optionally) b_l1l2l3. 
+    def generate_data(self, seed=None, Cl_input=[], output_type='map', b_input=None, add_B=False, remove_mean=True):
+        """
+        Generate a full-sky map with a given set of C_ell^{XY} and (optionally) b_l1l2l3. 
+        The input Cl are expected to by in the form {ClTT, ClTE, ClTB, ClEE, ClEB, ClBB} if polarized, else ClTT.
 
         We use the method of Smith & Zaldarriaga 2006, and assume that b_l1l2l3 is separable into three identical pieces.
 
         We optionally subtract off the mean of the map (numerically, but could be done analytically), since it is not guaranteed to be zero if we include a synthetic bispectrum.
 
-        No mask is added at this stage."""
-        
+        No mask is added at this stage, and the output can be in map- or harmonic-space.
+        """
+        assert output_type in ['harmonic','map'], "Valid output types are 'harmonic' and 'map' only!"
+    
         # Define seed
         if seed!=None:
             np.random.seed(seed)
@@ -133,21 +211,30 @@ class PolyBin():
         # Define input power spectrum
         if len(Cl_input)==0:
             Cl_input = self.Cl
-
-        # Generate a_lm
-        initial_lm = healpy.synalm(Cl_input,self.lmax)
-
-        if not add_B:
-            return self.to_map(initial_lm)
+        if self.pol:
+            assert len(Cl_input)==6, "Need to specify {ClTT, ClTE, ClTB, ClEE, ClEB, ClBB}"
+        else:
+            if len(Cl_input)!=1: Cl_input = [Cl_input]
         
+        # Generate a_lm maps (either T or T,E,B)
+        initial_lm = healpy.synalm(Cl_input,self.lmax, new=False)
+        
+        if not add_B:
+            if output_type=='map': return self.to_map(initial_lm)
+            else: return initial_lm
+        
+        if self.pol:
+            raise Exception("Bispectrum polarization generation not yet implemented!")
+
         # Interpolate Cl to all l values
         ls = np.arange(self.lmax+1)
-        Cl_input_lm = InterpolatedUnivariateSpline(ls, Cl_input)(self.l_arr)
+        Cl_input_lm = [InterpolatedUnivariateSpline(ls, Cl_input[i])(self.l_arr) for i in range(self.n_Cl)]
         for i in range(self.lmax+1):
-            if Cl_input[i]==0:
-                Cl_input_lm[self.l_arr==i] = 0.
+            for f in range(self.n_Cl):
+                if Cl_input[f][i]==0: Cl_input_lm[f][self.l_arr==i] = 0.
         
         # Compute gradient map
+        if self.pol: raise Exception("Need to do full matrix inverse here?")
         Cinv_lm = self.safe_divide(initial_lm,Cl_input_lm)
         bCinv_map = self.to_map(b_input(self.l_arr)*Cinv_lm)
         grad_lm = 0.5*b_input(self.l_arr)*self.to_lm(bCinv_map*bCinv_map)
@@ -172,14 +259,25 @@ class PolyBin():
         
         return output_map
     
-    def applyUinv(self, input_map):
-        """Apply the exact inverse weighting U^{-1} to a map. This assumes a diagonal C_l weighting, as produced by generate_data."""
+    def applyAinv(self, input_map, input_type='map', output_type='map'):
+        """Apply the exact inverse weighting A^{-1} to a map. This assumes a diagonal-in-ell C_l^{XY} weighting, as produced by generate_data.
         
-        # Transform to harmonic space
-        input_map_lm = self.to_lm(input_map)
+        Note that the code has two input and output options: "harmonic" or "map", to avoid unnecessary transforms.
+        """
+    
+        assert input_type in ['harmonic','map'], "Valid input types are 'harmonic' and 'map' only!"
+        assert output_type in ['harmonic','map'], "Valid output types are 'harmonic' and 'map' only!"
+
+        # Transform to harmonic space, if necessary
+        if input_type=='map': input_map_lm = self.to_lm(input_map)
+        else: input_map_lm = input_map.copy()
+            
+        # Divide by covariance
+        if not self.pol:
+            output = [self.safe_divide(input_map_lm[0],self.Cl_lm[0])]
+        else:
+            output = np.einsum('ijk,jk->ik',self.inv_Cl_lm_mat,input_map_lm,order='C')
         
-        # Divide by covariance and return to map-space
-        output = self.to_map(self.safe_divide(input_map_lm,self.Cl_lm))
-        
-        return output
- 
+        # Optionally return to map-space
+        if output_type=='map': return self.to_map(output)
+        else: return output

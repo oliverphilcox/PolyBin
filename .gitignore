@@ -3,6 +3,7 @@
 notebooks/*.ipynb
 notebooks
 testing
+testing*.ipynb
 testing/*
 *.txt
 *.csv
