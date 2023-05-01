@@ -8,6 +8,7 @@ testing/*
 *.txt
 *.csv
 *.png
+polybin/*old*
 planck
 planck/*
 planck_trispectrum/*

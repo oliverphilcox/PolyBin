@@ -9,7 +9,7 @@ import pywigxjpf as wig
 
 class BSpec():
     """Bispectrum estimation class. This takes the binning strategy as input and a base class. 
-    We also feed in a function that applies the S^-1 operator in real space.
+    We also feed in a function that applies the S^-1 operator.
 
     Note that we can additionally compute squeezed triangles by setting l_bins_squeeze, giving a different lmax for short and long sides.
     
@@ -20,16 +20,21 @@ class BSpec():
     - l_bins: array of bin edges
     - l_bins_squeeze: array of squeezed bin edges (optional)
     - include_partial_triangles: whether to include triangles whose centers don't satisfy the triangle conditions. (Default: False)
+    - fields: which T/E/B bispectra to compute
+    - parity: whether to include contributions from parity 'even' , 'odd' physics or 'both'.
     """
-    def __init__(self, base, mask, applySinv, l_bins, l_bins_squeeze=[], include_partial_triangles=False):
+    def __init__(self, base, mask, applySinv, l_bins, l_bins_squeeze=[], include_partial_triangles=False, fields=['TTT','TTE','TEE','EEE','TBB','EBB','TTB','TEB','EEB','BBB'], parity='even'):
         # Read in attributes
         self.base = base
         self.mask = mask
         self.applySinv = applySinv
         self.l_bins = l_bins
+        self.pol = self.base.pol
+        self.parity = parity
+        self.fields = fields
         self.min_l = np.min(l_bins)
         self.Nl = len(l_bins)-1
-
+        
         if len(l_bins_squeeze)>0:
             self.l_bins_squeeze = l_bins_squeeze
             self.Nl_squeeze = len(l_bins_squeeze)-1
@@ -42,7 +47,27 @@ class BSpec():
         self.include_partial_triangles = include_partial_triangles
         self.beam = self.base.beam
         self.beam_lm = self.base.beam_lm
+
+        # Check correct fields are being used
+        for f in fields:
+            assert f in ['TTT','TTE','TEE','EEE','TBB','EBB','TTB','TEB','EEB','BBB'], "Unknown field '%s' supplied!"%f 
+        assert len(fields)==len(np.unique(fields)), "Duplicate fields supplied!"
+
+        if not self.pol and fields!=['TTT']:
+            print("## Polarization mode not turned on; setting fields to TT only!")
+            self.fields = ['TTT']
         
+        # Check correct parities being used
+        assert parity in ['even','odd','both'], "Parity must be one of 'even', 'odd' or 'both'!"
+        if not self.pol and parity!='even':
+            print("Caution: scalar 3-point functions can't probe parity-odd primordial physics!")
+        if parity=='even':
+            self.chi_arr = [1]
+        elif parity=='odd':
+            self.chi_arr = [-1]
+        else:
+            self.chi_arr = [1, -1]
+
         if np.max(self.l_bins_squeeze)>base.lmax:
             raise Exception("Maximum l is larger than HEALPix resolution!")
         print("Binning: %d bins in [%d, %d]"%(self.Nl,self.min_l,np.max(self.l_bins)))
@@ -51,9 +76,17 @@ class BSpec():
         
         # Define l filters
         self.ell_bins = [(self.base.l_arr>=self.l_bins_squeeze[bin1])&(self.base.l_arr<self.l_bins_squeeze[bin1+1]) for bin1 in range(self.Nl_squeeze)]
+
+        # Check if window is uniform
+        if np.std(self.mask)<1e-12 and np.abs(np.mean(self.mask)-1)<1e-12:
+            print("Mask: ones")
+            self.ones_mask = True
+        else:
+            print("Mask: spatially varying")
+            self.ones_mask = False
         
     def _check_bin(self, bin1, bin2, bin3):
-        """Return one if modes in the bin satisfy the even-parity triangle conditions, or zero else.
+        """Return one if modes in the bin satisfy the triangle conditions, or zero else.
 
         This is used either for all triangles in the bin, or just the center of the bin.
         """
@@ -62,8 +95,6 @@ class BSpec():
             for l1 in range(self.l_bins[bin1],self.l_bins[bin1+1]):
                 for l2 in range(self.l_bins_squeeze[bin2],self.l_bins_squeeze[bin2+1]):
                     for l3 in range(self.l_bins_squeeze[bin3],self.l_bins_squeeze[bin3+1]):
-                        # skip any odd bins
-                        if (-1)**(l1+l2+l3)==-1: continue 
                         if l1>=abs(l1-l2) and l3<=l1+l2:
                             good = 1
                         if good==1: break
@@ -83,77 +114,101 @@ class BSpec():
          
     def _compute_symmetry_factor(self):
         """
-        Compute symmetry factor giving the degeneracy of each bin.
+        Compute symmetry factor giving the degeneracy of each bin. This is performed for each choice of parity and field and stacked.
         """
-        sym_factor = []
+        self.sym_factor_all = []
+
+        # Iterate over parities
+        for chi in self.chi_arr:
+            
+            # Iterate over fields
+            for u in self.fields:
+                u1, u2, u3 = [self.base.indices[u[i]] for i in range(3)]
+
+                sym_factor = []
+                for bin1 in range(self.Nl):
+                    for bin2 in range(self.Nl_squeeze):
+                        if u1==u2 and bin2<bin1: continue
+                        for bin3 in range(self.Nl_squeeze):
+                            if u2==u3 and bin3<bin2: continue
+
+                            # skip bins outside the triangle conditions
+                            if not self._check_bin(bin1,bin2,bin3): continue
+
+                            # compute symmetry factor
+                            if bin1==bin2 and u1==u2 and bin2==bin3 and u2==u3:
+                                sym = 6
+                            elif bin1==bin2 and u1==u2:
+                                sym = 2
+                            elif bin2==bin3 and u2==u3:
+                                sym = 2
+                            else:
+                                sym = 1
+                            sym_factor.append(sym)
+                self.sym_factor_all.append(np.asarray(sym_factor))
         
-        # Iterate over bins
-        for bin1 in range(self.Nl):
-            for bin2 in range(bin1,self.Nl_squeeze):
-                for bin3 in range(bin2,self.Nl_squeeze):
-                    
-                    # skip bins outside the triangle conditions
-                    if not self._check_bin(bin1,bin2,bin3): continue
-
-                    # compute symmetry factor
-                    if bin1==bin2 and bin2==bin3:
-                        sym = 6
-                    elif bin1==bin2 or bin2==bin3:
-                        sym = 2
-                    else:
-                        sym = 1
-                    sym_factor.append(sym)
-        self.sym_factor = np.asarray(sym_factor)
-
-        # Count number of bins
+        self.sym_factor = np.concatenate(self.sym_factor_all)
         self.N_b = len(self.sym_factor)
-        print("Using %d bispectrum bins"%self.N_b)
+        print("Using %d combination(s) of fields/parities"%len(self.sym_factor_all))
+        print("Using a maximum of %d bins per field/parity"%np.max([len(s) for s in self.sym_factor_all]))
+        print("Using a total of %d bins"%self.N_b)
         
-    def get_ells(self):
+    def get_ells(self, field='TTT'):
         """
-        Return an array with the central l1, l2, l3 values for each bispectrum bin.
+        Return an array with the central l1, l2, l3 values for each bispectrum bin, given a set of fields.
         """
-        # Iterate over bins
-        l1s, l2s, l3s = [],[],[]
+        assert field in self.fields, "Specified field '%s' not in inputs!"%field
+        u1, u2, u3 = [self.base.indices[field[i]] for i in range(3)]
 
+        l1s, l2s, l3s = [],[],[]
         for bin1 in range(self.Nl):
             l1 = 0.5*(self.l_bins[bin1]+self.l_bins[bin1+1])
-            for bin2 in range(bin1,self.Nl_squeeze):
+            for bin2 in range(self.Nl_squeeze):
+                if u1==u2 and bin2<bin1: continue
                 l2 = 0.5*(self.l_bins_squeeze[bin2]+self.l_bins_squeeze[bin2+1])
-                for bin3 in range(bin2,self.Nl_squeeze):
+                for bin3 in range(self.Nl_squeeze):
+                    if u2==u3 and bin3<bin2: continue
                     l3 = 0.5*(self.l_bins_squeeze[bin3]+self.l_bins_squeeze[bin3+1])
-                
+            
                     # skip bins outside the triangle conditions
                     if not self._check_bin(bin1,bin2,bin3): continue
-
+                    
                     # Add to output array
                     l1s.append(l1)
                     l2s.append(l2)
                     l3s.append(l3)
         return l1s,l2s,l3s
-
-    def load_sims(self, sims, verb=False):
+    
+    def load_sims(self, sims, verb=False, input_type='map'):
         """
         Load in Monte Carlo simulations used in the linear term of the bispectrum estimator. 
         These can alternatively be generated with a fiducial spectrum using the generate_sims script.
+
+        We can read in input simulations either in map- or harmonic-space.
         """
         
         self.N_it = len(sims)
         print("Using %d Monte Carlo simulations"%self.N_it)
         
         # Iterate over simulations
-        self.Q_b_alpha_maps = []
+        self.p1_H_maps, self.m2_H_maps = [], []
         
         for ii in range(self.N_it):
             if ii%5==0 and verb: print("Processing bias simulation %d of %d"%(ii+1,self.N_it))
             
             # Transform to Fourier space and normalize appropriately
-            Wh_alpha_lm = self.base.to_lm(self.mask*self.applySinv(sims[ii]))
+            if self.ones_mask:
+                Wh_alpha_lm = self.applySinv(sims[ii], input_type=input_type, output_type='harmonic')
+            else:
+                Wh_alpha_lm = self.base.to_lm(self.mask*self.applySinv(sims[ii],input_type=input_type))
             
-            Q_b_alpha_map = [self.base.to_map(Wh_alpha_lm*self.ell_bins[bin1]*self.beam_lm) for bin1 in range(self.Nl_squeeze)]
+            # Compute (+1)H and (-2)H maps
+            p1_H_maps = [self.base.compute_spin_transform_map(self.ell_bins[bin1]*self.beam_lm*Wh_alpha_lm.conj(),1) for bin1 in range(self.Nl_squeeze)]
+            m2_H_maps = [self.base.compute_spin_transform_map(self.ell_bins[bin1]*self.beam_lm*Wh_alpha_lm.conj(),-2) for bin1 in range(self.Nl_squeeze)]
             
-            self.Q_b_alpha_maps.append(Q_b_alpha_map)
-        
+            self.p1_H_maps.append(p1_H_maps)
+            self.m2_H_maps.append(m2_H_maps)
+            
     def generate_sims(self, N_it, Cl_input=[], b_input=None, add_B=False, remove_mean=True, verb=False):
         """
         Generate Monte Carlo simulations used in the linear term of the bispectrum generator. 
@@ -169,26 +224,33 @@ class BSpec():
         # Define input power spectrum (with noise)
         if len(Cl_input)==0:
             Cl_input = self.base.Cl
+
+        self.p1_H_maps, self.m2_H_maps = [],[]
         
         # Iterate over simulations
         self.Q_b_alpha_maps = []
         for ii in range(N_it):
             if ii%5==0 and verb: print("Generating bias simulation %d of %d"%(ii+1,N_it))
             
-            # Generate simulation
-            raw_alpha = self.base.generate_data(int(1e5)+ii, Cl_input=Cl_input, b_input=b_input, add_B=add_B, remove_mean=remove_mean)
+            # Generate simulation and Fourier transform
+            if self.ones_mask:
+                raw_alpha_lm = self.base.generate_data(int(1e5)+ii, Cl_input=Cl_input, b_input=b_input, add_B=add_B, remove_mean=remove_mean, output_type='harmonic')
+                Wh_alpha_lm = self.applySinv(raw_alpha_lm, input_type='harmonic', output_type='harmonic')
+            else:
+                raw_alpha = self.base.generate_data(int(1e5)+ii, Cl_input=Cl_input, b_input=b_input, add_B=add_B, remove_mean=remove_mean)
+                Wh_alpha_lm = self.base.to_lm(self.mask*self.applySinv(raw_alpha*self.mask))
             
-            # Transform to Fourier space and normalize appropriately
-            Wh_alpha_lm = self.base.to_lm(self.mask*self.applySinv(raw_alpha*self.mask))
+            # Compute (+1)H and (-2)H maps
+            p1_H_maps = [self.base.compute_spin_transform_map(self.ell_bins[bin1]*self.beam_lm*Wh_alpha_lm.conj(),1) for bin1 in range(self.Nl_squeeze)]
+            m2_H_maps = [self.base.compute_spin_transform_map(self.ell_bins[bin1]*self.beam_lm*Wh_alpha_lm.conj(),-2) for bin1 in range(self.Nl_squeeze)]
             
-            Q_b_alpha_map = [self.base.to_map(Wh_alpha_lm*self.ell_bins[bin1]*self.beam_lm) for bin1 in range(self.Nl_squeeze)]
+            self.p1_H_maps.append(p1_H_maps)
+            self.m2_H_maps.append(m2_H_maps)
             
-            self.Q_b_alpha_maps.append(Q_b_alpha_map)
-    
     ### OPTIMAL ESTIMATOR
     def Bl_numerator(self, data, include_linear_term=True, verb=False):
         """
-        Compute the numerator of the unwindowed bispectrum estimator. We can optionally drop the linear term
+        Compute the numerator of the unwindowed bispectrum estimator for all fields of interest. We can optionally drop the linear term (usually for testing).
         """
         
         # Compute symmetry factor if necessary
@@ -198,23 +260,45 @@ class BSpec():
         if not hasattr(self, 'Q_b_alpha_maps') and include_linear_term:
             raise Exception("Need to generate or specify bias simulations!")
         
-        # Apply W * S^-1 to data and transform to harmonic space, then compute Q map
-        Wh_data_lm = self.base.to_lm(self.mask*self.applySinv(data))
-        Q_b_map = [self.base.to_map(Wh_data_lm*self.ell_bins[bin1]*self.beam_lm) for bin1 in range(self.Nl_squeeze)]
+        # Apply W * S^-1 to data and transform to harmonic space
+        if self.ones_mask:
+            Wh_data_lm = self.applySinv(data, input_type='map', output_type='harmonic')
+        else:
+            Wh_data_lm = self.base.to_lm(self.mask*self.applySinv(data))
+        
+        # Compute (+1)H and (-2)H maps
+        if verb: print("Computing H maps")
+        p1_H_maps = [self.base.compute_spin_transform_map(self.ell_bins[bin1]*self.beam_lm*Wh_data_lm.conj(),1) for bin1 in range(self.Nl_squeeze)]
+        m2_H_maps = [self.base.compute_spin_transform_map(self.ell_bins[bin1]*self.beam_lm*Wh_data_lm.conj(),-2) for bin1 in range(self.Nl_squeeze)]
 
         # Compute b_3 part of cubic estimator
         b3_num = np.zeros(self.N_b)
         index = 0
         if verb: print("Computing b_3 piece")
-        for bin1 in range(self.Nl):
-            for bin2 in range(bin1,self.Nl_squeeze):
-                for bin3 in range(bin2,self.Nl_squeeze):
-                    # skip bins outside the triangle conditions
-                    if not self._check_bin(bin1,bin2,bin3): continue
+        for chi in self.chi_arr:
+            for u in self.fields:
+                u1, u2, u3 = [self.base.indices[u[i]] for i in range(3)]
+                p_u = np.product([self.base.parities[u[i]] for i in range(3)])
+                
+                for bin1 in range(self.Nl):
+                    for bin2 in range(self.Nl_squeeze):
+                        if u1==u2 and bin2<bin1: continue
+                        for bin3 in range(self.Nl_squeeze):
+                            if u2==u3 and bin3<bin2: continue
 
-                    # compute numerators
-                    b3_num[index] = self.base.A_pix*np.sum(Q_b_map[bin1]*Q_b_map[bin2]*Q_b_map[bin3])/self.sym_factor[index]
-                    index += 1
+                            # skip bins outside the triangle conditions
+                            if not self._check_bin(bin1,bin2,bin3): continue
+
+                            # Compute combination of fields
+                            tmp_sum  = p1_H_maps[bin1][u1]*p1_H_maps[bin2][u2]*m2_H_maps[bin3][u3]
+                            tmp_sum += p1_H_maps[bin2][u2]*p1_H_maps[bin3][u3]*m2_H_maps[bin1][u1]
+                            tmp_sum += p1_H_maps[bin3][u3]*p1_H_maps[bin1][u1]*m2_H_maps[bin2][u2]
+                                
+                            # Perform map-level summation and take real/im part
+                            if p_u*chi==-1:
+                                tmp_sum *= 1.0j
+                            b3_num[index] = self.base.A_pix*np.real(np.sum(tmp_sum))/3./self.sym_factor[index]
+                            index += 1
         
         # Compute b_1 part of cubic estimator, averaging over simulations
         b1_num = np.zeros(self.N_b)
@@ -225,21 +309,40 @@ class BSpec():
             for ii in range(self.N_it):
                 if (ii+1)%5==0 and verb: print("Computing b_1 piece from simulation %d"%(ii+1))
 
-                # Iterate over bins
                 index = 0
-                for bin1 in range(self.Nl):
-                    for bin2 in range(bin1,self.Nl_squeeze):
-                        for bin3 in range(bin2,self.Nl_squeeze):
-                            # skip bins outside the triangle conditions
-                            if not self._check_bin(bin1,bin2,bin3): continue
+                for chi in self.chi_arr:
+                    for u in self.fields:
+                        u1, u2, u3 = [self.base.indices[u[i]] for i in range(3)]
+                        p_u = np.product([self.base.parities[u[i]] for i in range(3)])
+                        
+                        for bin1 in range(self.Nl):
+                            for bin2 in range(self.Nl_squeeze):
+                                if u1==u2 and bin2<bin1: continue
+                                for bin3 in range(self.Nl_squeeze):
+                                    if u2==u3 and bin3<bin2: continue
 
-                            # compute numerators, summing over permutations
-                            b1_num[index] += -self.base.A_pix*np.sum(self.Q_b_alpha_maps[ii][bin1]*self.Q_b_alpha_maps[ii][bin2]*Q_b_map[bin3])/self.sym_factor[index]/self.N_it
-                            b1_num[index] += -self.base.A_pix*np.sum(self.Q_b_alpha_maps[ii][bin1]*Q_b_map[bin2]*self.Q_b_alpha_maps[ii][bin3])/self.sym_factor[index]/self.N_it
-                            b1_num[index] += -self.base.A_pix*np.sum(Q_b_map[bin1]*self.Q_b_alpha_maps[ii][bin2]*self.Q_b_alpha_maps[ii][bin3])/self.sym_factor[index]/self.N_it
+                                    # skip bins outside the triangle conditions
+                                    if not self._check_bin(bin1,bin2,bin3): continue
 
-                            index += 1
-
+                                    # Compute combination of fields
+                                    tmp_sum  = p1_H_maps[bin1][u1]*self.p1_H_maps[ii][bin2][u2]*self.m2_H_maps[ii][bin3][u3]
+                                    tmp_sum += p1_H_maps[bin2][u2]*self.p1_H_maps[ii][bin3][u3]*self.m2_H_maps[ii][bin1][u1]
+                                    tmp_sum += p1_H_maps[bin3][u3]*self.p1_H_maps[ii][bin1][u1]*self.m2_H_maps[ii][bin2][u2]
+                                    
+                                    tmp_sum += self.p1_H_maps[ii][bin1][u1]*p1_H_maps[bin2][u2]*self.m2_H_maps[ii][bin3][u3]
+                                    tmp_sum += self.p1_H_maps[ii][bin2][u2]*p1_H_maps[bin3][u3]*self.m2_H_maps[ii][bin1][u1]
+                                    tmp_sum += self.p1_H_maps[ii][bin3][u3]*p1_H_maps[bin1][u1]*self.m2_H_maps[ii][bin2][u2]
+                                    
+                                    tmp_sum += self.p1_H_maps[ii][bin1][u1]*self.p1_H_maps[ii][bin2][u2]*m2_H_maps[bin3][u3]
+                                    tmp_sum += self.p1_H_maps[ii][bin2][u2]*self.p1_H_maps[ii][bin3][u3]*m2_H_maps[bin1][u1]
+                                    tmp_sum += self.p1_H_maps[ii][bin3][u3]*self.p1_H_maps[ii][bin1][u1]*m2_H_maps[bin2][u2]
+                           
+                                    # Perform map-level summation and take real/im part, summing over permutations
+                                    if p_u*chi==-1:
+                                        tmp_sum*=1.0j
+                                    b1_num[index] = -self.base.A_pix*np.real(np.sum(tmp_sum))/3./self.sym_factor[index]/self.N_it
+                                    index += 1
+        
         # Assemble numerator
         b_num = b3_num + b1_num
         return b_num
@@ -248,93 +351,169 @@ class BSpec():
         """
         This computes the contribution to the Fisher matrix from a single pair of GRF simulations, created internally.
         """
-        
+
         # Compute symmetry factor, if not already present
         if not hasattr(self, 'sym_factor'):
             self._compute_symmetry_factor()
         
         # Initialize output
-        fish = np.zeros((self.N_b,self.N_b))
-        
-        # Compute two random realizations with known power spectrum
-        if verb: print("Generating pair of GRFs")
-        u1 = self.base.generate_data(seed=seed+int(1e7))
-        u2 = self.base.generate_data(seed=seed+int(2e7))
+        fish = np.zeros((self.N_b,self.N_b),dtype='complex')
 
-        # Compute weighted fields
-        Sinv_u1, Sinv_u2 = self.applySinv(u1), self.applySinv(u2)
-        Uinv_u1, Uinv_u2 = self.base.applyUinv(u1), self.base.applyUinv(u2)
+        WSinvW_Q_Ainv_maps12 = []
+        Q_Sinv_maps12 = []
 
-        # Define H maps
-        if verb: print("Creating H_b maps")
-        WSinv_u1_lm, WSinv_u2_lm = self.base.to_lm(self.mask*Sinv_u1), self.base.to_lm(self.mask*Sinv_u2)
-        WUinv_u1_lm, WUinv_u2_lm = self.base.to_lm(self.mask*Uinv_u1), self.base.to_lm(self.mask*Uinv_u2)
-        H_b_Sinv_u1 = [self.base.to_map(WSinv_u1_lm*self.ell_bins[bin1]*self.beam_lm)*self.mask for bin1 in range(self.Nl_squeeze)]
-        H_b_Uinv_u1 = [self.base.to_map(WUinv_u1_lm*self.ell_bins[bin1]*self.beam_lm)*self.mask for bin1 in range(self.Nl_squeeze)]
-        H_b_Sinv_u2 = [self.base.to_map(WSinv_u2_lm*self.ell_bins[bin1]*self.beam_lm)*self.mask for bin1 in range(self.Nl_squeeze)]
-        H_b_Uinv_u2 = [self.base.to_map(WUinv_u2_lm*self.ell_bins[bin1]*self.beam_lm)*self.mask for bin1 in range(self.Nl_squeeze)]
+        for ii in range(2):
 
-        # Compute pairs of H fields
-        # NB: ordering is such that largest index is first
-        if verb: print("Computing (H_b H_b')_{lm}")
-        HH_Sinv_lms11 = [[self.base.to_lm(H_b_Sinv_u1[bin1]*H_b_Sinv_u1[bin2]) for bin2 in range(bin1+1)] for bin1 in range(self.Nl_squeeze)]
-        HH_Uinv_lms11 = [[self.base.to_lm(H_b_Uinv_u1[bin1]*H_b_Uinv_u1[bin2]) for bin2 in range(bin1+1)] for bin1 in range(self.Nl_squeeze)]
-        HH_Sinv_lms22 = [[self.base.to_lm(H_b_Sinv_u2[bin1]*H_b_Sinv_u2[bin2]) for bin2 in range(bin1+1)] for bin1 in range(self.Nl_squeeze)]
-        HH_Uinv_lms22 = [[self.base.to_lm(H_b_Uinv_u2[bin1]*H_b_Uinv_u2[bin2]) for bin2 in range(bin1+1)] for bin1 in range(self.Nl_squeeze)]
+            if verb: print("# Generating GRF %d of 2"%(ii+1))
 
-        # Iterate over bins
-        WSinvW_Q_Uinv_maps11 = []
-        WSinvW_Q_Uinv_maps22 = []
-        Q_Sinv_maps11 = []
-        Q_Sinv_maps22 = []
-        index = 0
-        if verb: print("Computing Q(b) maps")
-        for bin1 in range(self.Nl):
-            for bin2 in range(bin1,self.Nl_squeeze):
-                for bin3 in range(bin2,self.Nl_squeeze):
-                    # skip bins outside the triangle conditions
-                    if not self._check_bin(bin1,bin2,bin3): continue
+            # Compute two random realizations with known power spectrum and weight appropriately
+            if self.ones_mask:
+                a_lm = self.base.generate_data(seed=seed+int((1+ii)*1e7), output_type='harmonic')
+                WSinv_a_lm = self.applySinv(a_lm, input_type='harmonic', output_type='harmonic')
+                WAinv_a_lm = self.base.applyAinv(a_lm, input_type='harmonic', output_type='harmonic')
 
-                    # Define Q with U^-1 weights
-                    this_Q_Uinv_lm11 =  2./self.sym_factor[index]*self.ell_bins[bin1]*self.beam_lm*HH_Uinv_lms11[bin3][bin2]
-                    this_Q_Uinv_lm11 += 2./self.sym_factor[index]*self.ell_bins[bin2]*self.beam_lm*HH_Uinv_lms11[bin3][bin1]
-                    this_Q_Uinv_lm11 += 2./self.sym_factor[index]*self.ell_bins[bin3]*self.beam_lm*HH_Uinv_lms11[bin2][bin1]
-                    this_Q_Uinv_lm22 =  2./self.sym_factor[index]*self.ell_bins[bin1]*self.beam_lm*HH_Uinv_lms22[bin3][bin2]
-                    this_Q_Uinv_lm22 += 2./self.sym_factor[index]*self.ell_bins[bin2]*self.beam_lm*HH_Uinv_lms22[bin3][bin1]
-                    this_Q_Uinv_lm22 += 2./self.sym_factor[index]*self.ell_bins[bin3]*self.beam_lm*HH_Uinv_lms22[bin2][bin1]
+            else:
+                a = self.base.generate_data(seed=seed+int((1+ii)*1e7))
+                WSinv_a_lm = self.base.to_lm(self.mask*self.applySinv(a))
+                WAinv_a_lm = self.base.to_lm(self.mask*self.base.applyAinv(a))
 
-                    # Apply weighting
-                    WSinvW_Q_Uinv_maps11.append(self.mask*self.applySinv(self.mask*self.base.to_map(this_Q_Uinv_lm11)))
-                    WSinvW_Q_Uinv_maps22.append(self.mask*self.applySinv(self.mask*self.base.to_map(this_Q_Uinv_lm22)))
+            # Define H maps
+            if verb: print("Creating H maps")
 
-                    # Define Q with S^-1 weights
-                    this_Q_Sinv_lm11 =  2./self.sym_factor[index]*self.ell_bins[bin1]*self.beam_lm*HH_Sinv_lms11[bin3][bin2]
-                    this_Q_Sinv_lm11 += 2./self.sym_factor[index]*self.ell_bins[bin2]*self.beam_lm*HH_Sinv_lms11[bin3][bin1]
-                    this_Q_Sinv_lm11 += 2./self.sym_factor[index]*self.ell_bins[bin3]*self.beam_lm*HH_Sinv_lms11[bin2][bin1]
-                    this_Q_Sinv_lm22 =  2./self.sym_factor[index]*self.ell_bins[bin1]*self.beam_lm*HH_Sinv_lms22[bin3][bin2]
-                    this_Q_Sinv_lm22 += 2./self.sym_factor[index]*self.ell_bins[bin2]*self.beam_lm*HH_Sinv_lms22[bin3][bin1]
-                    this_Q_Sinv_lm22 += 2./self.sym_factor[index]*self.ell_bins[bin3]*self.beam_lm*HH_Sinv_lms22[bin2][bin1]
+            def compute_H_pm(a_lm, spin):
+                assert spin>0
+                if self.ones_mask:
+                    H_plus = [self.base.compute_spin_transform_map(a_lm*self.ell_bins[bin1]*self.beam_lm, spin) for bin1 in range(self.Nl_squeeze)]
+                else:
+                    H_plus = [self.mask*self.base.compute_spin_transform_map(a_lm*self.ell_bins[bin1]*self.beam_lm, spin) for bin1 in range(self.Nl_squeeze)]
+                H_minus = [np.asarray([(-1)**spin*H.conj() for H in this_H_plus]) for this_H_plus in H_plus]
+                return H_plus, H_minus
 
-                    Q_Sinv_maps11.append(self.base.to_map(this_Q_Sinv_lm11))
-                    Q_Sinv_maps22.append(self.base.to_map(this_Q_Sinv_lm22))
-                    index += 1
+            H_pm2_Sinv_maps = compute_H_pm(WSinv_a_lm, 2)
+            H_pm1_Sinv_maps = compute_H_pm(WSinv_a_lm, 1)
+            H_pm2_Ainv_maps = compute_H_pm(WAinv_a_lm, 2)
+            H_pm1_Ainv_maps = compute_H_pm(WAinv_a_lm, 1)
+
+            # Compute pairs of H fields
+            # NB: ordering is such that largest index is first if degenerate
+            if verb: print("Computing (H H')_{lm}")
+
+            def compute_HH(H_pm2, H_pm1):
+                HH_arr = []
+                for u2 in range(1+2*self.pol):
+                    HH_arr1 = []
+                    for u3 in range(u2+1):
+                        HH_arr2 = []
+                        for b2 in range(self.Nl_squeeze):
+                            HH_arr3 = []
+                            for b3 in range(self.Nl_squeeze):
+                                if u2==u3 and b3>b2: continue
+
+                                # Compute forward harmonic transforms (for both odd and even pieces simultaneously
+                                out = self.base.to_lm_spin(H_pm1_Sinv_maps[0][b2][u2]*H_pm1_Sinv_maps[0][b3][u3],H_pm1_Sinv_maps[1][b2][u2]*H_pm1_Sinv_maps[1][b3][u3],2)[::-1].conj()
+                                if b2==b3 and u2==u3:
+                                    out -= 2*np.asarray([[1],[-1]])*self.base.to_lm_spin(H_pm1_Sinv_maps[1][b2][u2]*H_pm2_Sinv_maps[0][b3][u3],-H_pm1_Sinv_maps[0][b2][u2]*H_pm2_Sinv_maps[1][b3][u3],1).conj()
+                                else:
+                                    out -= np.asarray([[1],[-1]])*self.base.to_lm_spin(H_pm1_Sinv_maps[1][b2][u2]*H_pm2_Sinv_maps[0][b3][u3],-H_pm1_Sinv_maps[0][b2][u2]*H_pm2_Sinv_maps[1][b3][u3],1).conj()
+                                    out -= np.asarray([[1],[-1]])*self.base.to_lm_spin(H_pm2_Sinv_maps[0][b2][u2]*H_pm1_Sinv_maps[1][b3][u3],-H_pm2_Sinv_maps[1][b2][u2]*H_pm1_Sinv_maps[0][b3][u3],1).conj()
+                                
+                                HH_arr3.append(out)
+                            HH_arr2.append(HH_arr3)
+                        HH_arr1.append(HH_arr2)
+                    HH_arr.append(HH_arr1)
+                return HH_arr
+
+            HH_Sinv_lms = compute_HH(H_pm2_Sinv_maps, H_pm1_Sinv_maps)
+            HH_Ainv_lms = compute_HH(H_pm2_Ainv_maps, H_pm1_Ainv_maps)
+
+            # Compute Q maps
+            if self.ones_mask:
+                WSinvW_Q_Ainv_maps = np.zeros((self.N_b,(1+2*self.pol)*len(WSinv_a_lm[0])),dtype='complex')
+                Q_Sinv_maps = np.zeros((self.N_b,(1+2*self.pol)*len(WSinv_a_lm[0])),dtype='complex')
+            else:
+                WSinvW_Q_Ainv_maps = np.zeros((self.N_b,(1+2*self.pol)*len(self.mask)),dtype='complex')
+                Q_Sinv_maps = np.zeros((self.N_b,(1+2*self.pol)*len(self.mask)),dtype='complex')
+
+            if verb: print("# Computing Q(b) maps")
+            index = 0
+            for u in self.fields:
+                u1, u2, u3 = [self.base.indices[u[i]] for i in range(3)]
+                p_u = np.product([self.base.parities[u[i]] for i in range(3)])
+                if verb: print("On field %s"%(u))
+
+                for bin1 in range(self.Nl):
+                    for bin2 in range(self.Nl_squeeze):
+                        if u1==u2 and bin2<bin1: continue
+                        for bin3 in range(self.Nl_squeeze):
+                            if u2==u3 and bin3<bin2: continue
+
+                            # skip bins outside the triangle conditions
+                            if not self._check_bin(bin1,bin2,bin3): continue
+
+                            def assemble_Q_lm(HH_maps):
+                                tmp_Q = np.zeros((1+2*self.pol,2,len(WSinv_a_lm[0])),dtype='complex')
+                                for X in range(1+2*self.pol):
+                                    if X==u1: 
+                                        tmp_Q[X] += 1./3./self.sym_factor[index]*self.ell_bins[bin1]*self.beam_lm*HH_maps[u3][u2][bin3][bin2]
+                                    if X==u2:
+                                        tmp_Q[X] += 1./3./self.sym_factor[index]*self.ell_bins[bin2]*self.beam_lm*HH_maps[u3][u1][bin3][bin1]
+                                    if X==u3:
+                                        tmp_Q[X] += 1./3./self.sym_factor[index]*self.ell_bins[bin3]*self.beam_lm*HH_maps[u2][u1][bin2][bin1]
+
+                                tmp_Q_p = tmp_Q[:,0]+p_u*tmp_Q[:,1] # chi = 1
+                                tmp_Q_m = tmp_Q[:,0]-p_u*tmp_Q[:,1] # chi = -1
+
+                                # Add imaginary parts if necessary
+                                if p_u==1:
+                                    tmp_Q_m *= 1.0j
+                                else:
+                                    tmp_Q_p *= 1.0j
+
+                                return tmp_Q_p, tmp_Q_m 
+
+                            # Define Q with A^-1 weights
+                            tmp_Q_p, tmp_Q_m = assemble_Q_lm(HH_Ainv_lms)
+
+                            # Apply weighting and add to output array
+                            if self.ones_mask:
+                                if self.parity=='even' or 'both': WSinvW_Q_Ainv_maps[index] = self.applySinv(tmp_Q_p,input_type='harmonic',output_type='harmonic').ravel()
+                                if self.parity=='both': WSinvW_Q_Ainv_maps[index+self.N_b//2] = self.applySinv(tmp_Q_m,input_type='harmonic',output_type='harmonic').ravel()
+                                if self.parity=='odd': WSinvW_Q_Ainv_maps[index] = self.applySinv(tmp_Q_m,input_type='harmonic',output_type='harmonic').ravel()
+                            else:
+                                if self.parity=='even' or 'both': WSinvW_Q_Ainv_maps[index] = (self.mask*self.applySinv(self.mask*self.base.to_map(tmp_Q_p))).ravel()
+                                if self.parity=='both': WSinvW_Q_Ainv_maps[index+self.N_b//2] = (self.mask*self.applySinv(self.mask*self.base.to_map(tmp_Q_m))).ravel()
+                                if self.parity=='odd': WSinvW_Q_Ainv_maps[index] = (self.mask*self.applySinv(self.mask*self.base.to_map(tmp_Q_m))).ravel()
+
+                            # Define Q with A^-1 weights
+                            tmp_Q_p, tmp_Q_m = assemble_Q_lm(HH_Sinv_lms)
+
+                            # Add to output array, with real/harmonic space weighting
+                            if self.ones_mask:
+                                if self.parity=='even' or 'both': Q_Sinv_maps[index] = (self.base.m_weight*tmp_Q_p).ravel()
+                                if self.parity=='both': Q_Sinv_maps[index+self.N_b//2] = (self.base.m_weight*tmp_Q_m).ravel()
+                                if self.parity=='odd': Q_Sinv_maps[index] = (self.base.m_weight*tmp_Q_m).ravel()
+                            else:
+                                if self.parity=='even' or 'both': Q_Sinv_maps[index] = self.base.A_pix*self.base.to_map(tmp_Q_p).ravel()
+                                if self.parity=='both': Q_Sinv_maps[index+self.N_b//2] = self.base.A_pix*self.base.to_map(tmp_Q_m).ravel()
+                                if self.parity=='odd': Q_Sinv_maps[index] = self.base.A_pix*self.base.to_map(tmp_Q_m).ravel()                        
+                            index += 1
+
+            # Add to output arrays
+            Q_Sinv_maps12.append(Q_Sinv_maps)
+            WSinvW_Q_Ainv_maps12.append(WSinvW_Q_Ainv_maps)
 
         # Assemble Fisher matrix
-        if verb: print("Computing Fisher matrix")
-        for index1 in range(self.N_b):
+        if verb: print("# Computing Fisher matrix")
+        
+        # Compute Fisher matrix as an outer product
+        fish += (Q_Sinv_maps12[0].conj())@(WSinvW_Q_Ainv_maps12[0].T)
+        fish += (Q_Sinv_maps12[1].conj())@(WSinvW_Q_Ainv_maps12[1].T)
+        fish -= (Q_Sinv_maps12[0].conj())@(WSinvW_Q_Ainv_maps12[1].T)
+        fish -= (Q_Sinv_maps12[1].conj())@(WSinvW_Q_Ainv_maps12[0].T)
 
-            # Define relevant maps
-            this_Q11 = Q_Sinv_maps11[index1]
-            this_Q22 = Q_Sinv_maps22[index1]
+        fish = fish.conj()/24.
 
-            for index2 in range(self.N_b):
-                # Form summand
-                summand  = 0.5*(this_Q11*WSinvW_Q_Uinv_maps11[index2]+this_Q22*WSinvW_Q_Uinv_maps22[index2])
-                summand  -= 0.5*(this_Q11*WSinvW_Q_Uinv_maps22[index2]+this_Q22*WSinvW_Q_Uinv_maps11[index2])
-                fish[index1,index2] += 1./12.*self.base.A_pix*np.sum(summand)
-
-        # Return matrix
-        return fish
+        return fish.real
     
     def compute_fisher(self, N_it, N_cpus=1):
         """
@@ -375,7 +554,7 @@ class BSpec():
         
         We can optionally switch off the linear term.
         """
-        
+
         if len(fish)!=0:
             self.fish = fish
             self.inv_fish = np.linalg.inv(fish)
@@ -389,100 +568,224 @@ class BSpec():
         # Apply normalization
         Bl_out = np.matmul(self.inv_fish,Bl_num)
         
-        return Bl_out
+        # Create output dictionary
+        Bl_dict = {}
+        index, config_index = 0,0
+        chi_name = {1:'+',-1:'-'}
+        for chi in self.chi_arr:
+
+            # Iterate over fields
+            for u in self.fields:
+                Bl_dict['%s'%u+'%s'%chi_name[chi]] = Bl_out[index:index+len(self.sym_factor_all[config_index])]
+                index += len(self.sym_factor_all[config_index])
+                config_index += 1
+
+        return Bl_dict
     
     ### IDEAL ESTIMATOR
-    def Bl_numerator_ideal(self, data):
+    def Bl_numerator_ideal(self, data, verb=False):
         """
-        Compute the numerator of the idealized bispectrum estimator. We normalize by < mask^3 >. Note that this does not include one-field terms.
+        Compute the numerator of the idealized bispectrum estimator for all fields of interest. We normalize by < mask^3 >. Note that this does not include one-field terms.
         """
-        # Normalize data by C_th and transform to harmonic space
-        Cinv_data_lm = self.base.safe_divide(self.base.to_lm(data),self.base.Cl_lm)
-        
-        # Compute I maps
-        I_map = [self.base.to_map(self.ell_bins[bin1]*self.beam_lm*Cinv_data_lm) for bin1 in range(self.Nl_squeeze)]
 
-        # Compute symmetry factor, if not already present
+        # Transform to harmonic space
+        data_lm = self.base.to_lm(data)
+
+        # Compute symmetry factor if necessary
         if not hasattr(self, 'sym_factor'):
             self._compute_symmetry_factor()
         
-        # Combine to find numerator
+        # Normalize data by 1/C_th
+        if not self.pol:
+            Cinv_data_lm = self.base.safe_divide(data_lm[0],self.base.Cl_lm[0]).reshape(1,-1)
+        else:
+            Cinv_data_lm = np.einsum('ijk,jk->ik',self.base.inv_Cl_lm_mat,data_lm,order='C')
+
+        # Compute (+1)H and (-2)H maps
+        if verb: print("Computing H maps")
+        p1_H_maps = [self.base.compute_spin_transform_map(self.ell_bins[bin1]*self.beam_lm*Cinv_data_lm.conj(),1) for bin1 in range(self.Nl_squeeze)]
+        m2_H_maps = [self.base.compute_spin_transform_map(self.ell_bins[bin1]*self.beam_lm*Cinv_data_lm.conj(),-2) for bin1 in range(self.Nl_squeeze)]
+
+        # Define output array
         b_num_ideal = np.zeros(self.N_b)
-        
-        # Iterate over bins
-        index = 0
-        for bin1 in range(self.Nl):
-            for bin2 in range(bin1,self.Nl_squeeze):
-                for bin3 in range(bin2,self.Nl_squeeze):
-                    
-                    # skip bins outside the triangle conditions
-                    if not self._check_bin(bin1,bin2,bin3): continue
-                    
-                    # compute numerators
-                    b_num_ideal[index] = self.base.A_pix*np.sum(I_map[bin1]*I_map[bin2]*I_map[bin3])
-                    index += 1
-                    
-        # Normalize
-        b_num_ideal *= 1./self.sym_factor/np.mean(self.mask**3)
-        return b_num_ideal
 
+        # Iterate over fields and bins
+        index = 0
+        for chi in self.chi_arr:
+            for u in self.fields:
+                u1, u2, u3 = [self.base.indices[u[i]] for i in range(3)]
+                p_u = np.product([self.base.parities[u[i]] for i in range(3)])
+                if verb: print("Analyzing bispectrum numerator for field %s with chi=%d"%(u,chi))
+
+                for bin1 in range(self.Nl):
+                    for bin2 in range(self.Nl_squeeze):
+                        if u1==u2 and bin2<bin1: continue
+                        for bin3 in range(self.Nl_squeeze):
+                            if u2==u3 and bin3<bin2: continue
+
+                            # skip bins outside the triangle conditions
+                            if not self._check_bin(bin1,bin2,bin3): continue
+
+                            # Compute combination of fields
+                            tmp_sum  = p1_H_maps[bin1][u1]*p1_H_maps[bin2][u2]*m2_H_maps[bin3][u3]
+                            tmp_sum += p1_H_maps[bin2][u2]*p1_H_maps[bin3][u3]*m2_H_maps[bin1][u1]
+                            tmp_sum += p1_H_maps[bin3][u3]*p1_H_maps[bin1][u1]*m2_H_maps[bin2][u2]
+                                
+                            # Perform map-level summation and take real/im part
+                            if p_u*chi==-1:
+                                tmp_sum *= 1.0j
+                            b_num_ideal[index] = self.base.A_pix*np.real(np.sum(tmp_sum))/3./self.sym_factor[index]
+                            index += 1
+
+        # Normalize
+        b_num_ideal *= 1./np.mean(self.mask**3)
+        return b_num_ideal
+    
     def compute_fisher_ideal(self, verb=False):
-        """This computes the idealized Fisher matrix for the bispectrum."""
-        
+        """This computes the idealized Fisher matrix for the bispectrum, including cross-correlations between different fields."""
+
         # Compute symmetry factor, if not already present
         if not hasattr(self, 'sym_factor'):
             self._compute_symmetry_factor()
-        
-        # Compute diagonal of matrix
-        fish_diag = np.zeros(self.N_b)
-        
-        # Iterate over bins
-        index = 0
-        for bin1 in range(self.Nl):
-            for bin2 in range(bin1,self.Nl_squeeze):
-                for bin3 in range(bin2,self.Nl_squeeze):
-                    
-                    # skip bins outside the triangle conditions
-                    if not self._check_bin(bin1,bin2,bin3): continue
 
-                    if (index+1)%25==0 and verb: print("Computing bin %d of %d"%(index+1,self.N_b))
-                    value = 0.
+        # Scalar case
+        if not self.pol:
 
-                    # Now iterate over l values in bin
-                    for l1 in range(self.l_bins[bin1],self.l_bins[bin1+1]):
-                        for l2 in range(self.l_bins_squeeze[bin2],self.l_bins_squeeze[bin2+1]):
-                            for l3 in range(max([abs(l1-l2),self.l_bins_squeeze[bin3]]),min([l1+l2+1,self.l_bins_squeeze[bin3+1]])):
-                                
-                                if (-1)**(l1+l2+l3)==-1: continue # 3j = 0 here
-                                tj = self.base.tj0(l1,l2,l3)
-                                value += tj**2*self.beam[l1]**2*self.beam[l2]**2*self.beam[l3]**2*(2.*l1+1.)*(2.*l2+1.)*(2.*l3+1.)/(4.*np.pi)/self.base.Cl[l1]/self.base.Cl[l2]/self.base.Cl[l3]
-                                            
-                    fish_diag[index] = value/self.sym_factor[index]
-                    index += 1
-        fish = np.diag(fish_diag)
-        
-        # Save attributes
-        self.fish_ideal = fish
-        self.inv_fish_ideal = np.diag(1./fish_diag)
-        
+            # Compute diagonal of matrix
+            fish_diag = np.zeros(self.N_b)
+            index = 0
+            p_u = 1
+
+            # Iterate over bins and parities
+            for chi in self.chi_arr:
+                for bin1 in range(self.Nl):
+                    for bin2 in range(bin1,self.Nl_squeeze):
+                        for bin3 in range(bin2,self.Nl_squeeze):
+
+                            # skip bins outside the triangle conditions
+                            if not self._check_bin(bin1,bin2,bin3): continue
+
+                            value = 0.
+
+                            # Now iterate over l values in bin
+                            for l1 in range(self.l_bins[bin1],self.l_bins[bin1+1]):
+                                for l2 in range(self.l_bins_squeeze[bin2],self.l_bins_squeeze[bin2+1]):
+                                    for l3 in range(max([abs(l1-l2),self.l_bins_squeeze[bin3]]),min([l1+l2+1,self.l_bins_squeeze[bin3+1]])):
+
+                                        if (-1)**(l1+l2+l3)!=chi*p_u: continue
+                                        tj = self.base.tj_sym(l1,l2,l3)
+
+                                        # note absorbing factor of chi*p_u here 
+                                        value += tj**2*self.beam[l1]**2*self.beam[l2]**2*self.beam[l3]**2*(2.*l1+1.)*(2.*l2+1.)*(2.*l3+1.)/(4.*np.pi)/self.base.Cl[0][l1]/self.base.Cl[0][l2]/self.base.Cl[0][l3]
+
+                            fish_diag[index] = value/self.sym_factor[index]
+                            index += 1
+            fish = np.diag(fish_diag)
+            self.fish_ideal = fish
+            self.inv_fish_ideal = np.diag(1./fish_diag)
+
+        # Tensor case
+        else:
+
+            # Compute full matrix
+            fish = np.zeros((self.N_b,self.N_b))
+
+            # Iterate over fields, parities, and bins
+            index = 0
+            for chi in self.chi_arr:
+                for u in self.fields:
+                    u1, u2, u3 = [self.base.indices[u[i]] for i in range(3)]
+                    p_u = np.product([self.base.parities[u[i]] for i in range(3)])
+
+                    if verb: print("Computing %s fisher matrix row with chi=%d"%(u,chi))
+
+                    for bin1 in range(self.Nl):
+                        for bin2 in range(self.Nl_squeeze):
+                            if u1==u2 and bin2<bin1: continue
+                            for bin3 in range(self.Nl_squeeze):
+                                if u2==u3 and bin3<bin2: continue
+
+                                # skip bins outside the triangle conditions
+                                if not self._check_bin(bin1,bin2,bin3): continue
+                                                            
+                                # Iterate over second set of fields, parities, and bins
+                                index_p = 0
+                                for chi_p in self.chi_arr:
+                                    for u_p in self.fields:
+                                        u1_p, u2_p, u3_p = [self.base.indices[u_p[i]] for i in range(3)]
+                                        p_u_p = np.product([self.base.parities[u_p[i]] for i in range(3)])
+
+                                        for bin1_p in range(self.Nl):
+                                            for bin2_p in range(self.Nl_squeeze):
+                                                if u1_p==u2_p and bin2_p<bin1_p: continue
+                                                for bin3_p in range(self.Nl_squeeze):
+                                                    if u2_p==u3_p and bin3_p<bin2_p: continue
+
+                                                    # skip bins outside the triangle conditions
+                                                    if not self._check_bin(bin1_p,bin2_p,bin3_p): continue
+
+                                                    if chi*p_u == chi_p*p_u_p and (np.sort([bin1,bin2,bin3])==np.sort([bin1_p,bin2_p,bin3_p])).all(): 
+
+                                                        # Now iterate over l values in bin
+                                                        value = 0.
+                                                        for l1 in range(self.l_bins[bin1],self.l_bins[bin1+1]):
+                                                            for l2 in range(self.l_bins_squeeze[bin2],self.l_bins_squeeze[bin2+1]):
+                                                                for l3 in range(max([abs(l1-l2),self.l_bins_squeeze[bin3]]),min([l1+l2+1,self.l_bins_squeeze[bin3+1]])):
+
+                                                                    if (-1)**(l1+l2+l3)!=chi*p_u: continue
+
+                                                                    # Compute product of three inverse covariances with permutations
+                                                                    Cinv_bin = lambda i,j,l: self.base.inv_Cl_mat[[u1,u2,u3][i],[u1_p,u2_p,u3_p][j]][l]*([bin1,bin2,bin3][i]==[bin1_p,bin2_p,bin3_p][j])
+                                                                    inv_cov3  = Cinv_bin(0,0,l1)*Cinv_bin(1,1,l2)*Cinv_bin(2,2,l3)
+                                                                    inv_cov3 += Cinv_bin(0,1,l1)*Cinv_bin(1,2,l2)*Cinv_bin(2,0,l3)
+                                                                    inv_cov3 += Cinv_bin(0,2,l1)*Cinv_bin(1,0,l2)*Cinv_bin(2,1,l3)
+                                                                    inv_cov3 += Cinv_bin(0,0,l1)*Cinv_bin(1,2,l2)*Cinv_bin(2,1,l3)
+                                                                    inv_cov3 += Cinv_bin(0,1,l1)*Cinv_bin(1,0,l2)*Cinv_bin(2,2,l3)
+                                                                    inv_cov3 += Cinv_bin(0,2,l1)*Cinv_bin(1,1,l2)*Cinv_bin(2,0,l3)
+                                                                    if inv_cov3==0: continue
+                                                                    
+                                                                    tj = self.base.tj_sym(l1,l2,l3)
+
+                                                                    # note absorbing factor of chi*p_u here 
+                                                                    value += tj**2*self.beam[l1]**2*self.beam[l2]**2*self.beam[l3]**2*(2.*l1+1.)*(2.*l2+1.)*(2.*l3+1.)/(4.*np.pi)*inv_cov3
+                                                        fish[index, index_p] += value/self.sym_factor[index]/self.sym_factor[index_p]
+                                                    index_p += 1
+                                index += 1
+
+            self.fish_ideal = fish
+            self.inv_fish_ideal = np.linalg.inv(self.fish_ideal)
+
         return fish
     
-    def Bl_ideal(self, data, fish_ideal=[]):
+    def Bl_ideal(self, data, fish_ideal=[], verb=False):
         """Compute the idealized bispectrum estimator, including normalization, if not supplied or already computed. Note that this normalizes by < mask^3 >."""
-        
+
         if len(fish_ideal)!=0:
             self.fish_ideal = fish_ideal
             self.inv_fish_ideal = np.linalg.inv(fish_ideal)
-        
+
         if not hasattr(self,'inv_fish_ideal'):
             print("Computing ideal Fisher matrix")
-            self.compute_fisher_ideal()
-            
+            self.compute_fisher_ideal(verb=verb)
+
         # Compute numerator
-        Bl_num_ideal = self.Bl_numerator_ideal(data)
-        
+        Bl_num_ideal = self.Bl_numerator_ideal(data, verb=verb)
+
         # Apply normalization
         Bl_out = np.matmul(self.inv_fish_ideal,Bl_num_ideal)
+
+        # Create output dictionary
+        Bl_dict = {}
+        index, config_index = 0,0
+        chi_name = {1:'+',-1:'-'}
+        for chi in self.chi_arr:
+
+            # Iterate over fields
+            for u in self.fields:
+                Bl_dict['%s'%u+'%s'%chi_name[chi]] = Bl_out[index:index+len(self.sym_factor_all[config_index])]
+                index += len(self.sym_factor_all[config_index])
+                config_index += 1
+
+        return Bl_dict
+
         
-        return Bl_out
-    

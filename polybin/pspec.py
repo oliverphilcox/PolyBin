@@ -9,13 +9,14 @@ import pywigxjpf as wig
 
 class PSpec():
     """Power spectrum estimation class. This takes the binning strategy as input and a base class. 
-    We also feed in a function that applies the S^-1 operator in real space. 
+    We also feed in a function that applies the S^-1 operator. 
     
     Inputs:
     - base: PolyBin class
     - mask: HEALPix mask to deconvolve
     - applySinv: function which returns S^-1 applied to a given input map
     - l_bins: array of bin edges
+    - fields: which T/E/B power spectra to compute
     """
     def __init__(self, base, mask, applySinv, l_bins, fields=['TT','TE','TB','EE','EB','EE']):
         # Read in attributes
@@ -32,11 +33,11 @@ class PSpec():
         # Check correct fields are being used
         for f in fields:
             assert f in ['TT','TE','TB','EE','EB','BB'], "Unknown field '%s' supplied!"%f 
-        assert len(fields)==len(np.unique(fields))
+        assert len(fields)==len(np.unique(fields)), "Duplicate fields supplied!"
         
         if not self.pol and fields!=['TT']:
             print("## Polarization mode not turned on; setting fields to TT only!")
-            fields = ['TT']
+            self.fields = ['TT']
 
         if np.max(self.l_bins)>base.lmax:
             raise Exception("Maximum l is larger than HEALPix resolution!")
@@ -46,9 +47,6 @@ class PSpec():
         # Define l filters
         self.ell_bins = [(self.base.l_arr>=self.l_bins[bin1])&(self.base.l_arr<self.l_bins[bin1+1]) for bin1 in range(self.Nl)]
         self.all_ell_bins = np.vstack(self.ell_bins)
-        
-        # Define m weights (for complex conjugates)
-        self.m_weight = (1.+1.*(self.base.m_arr>0.))
         
         # Check if window is uniform
         if np.std(self.mask)<1e-12 and np.abs(np.mean(self.mask)-1)<1e-12:
@@ -79,7 +77,7 @@ class PSpec():
 
         # Compute numerator (including beam)
         if not self.pol:
-            Cl_num = 0.5*np.real(np.sum(self.m_weight*Wh_data_lm*np.conj(Wh_data_lm)*self.all_ell_bins*self.beam_lm**2,axis=1))
+            Cl_num = 0.5*np.real(np.sum(self.base.m_weight*Wh_data_lm*np.conj(Wh_data_lm)*self.all_ell_bins*self.beam_lm**2,axis=1))
         else:
             Cl_num = []
             for u in self.fields:
@@ -91,7 +89,7 @@ class PSpec():
                 spec_squared = np.conj(Wh_data_lm[u1])*Wh_data_lm[u2]
                 
                 # Compute full numerator
-                Cl_u1u2 = 1./Delta2_u*np.sum(self.m_weight*spec_squared*self.all_ell_bins*self.beam_lm**2,axis=1)
+                Cl_u1u2 = 1./Delta2_u*np.sum(self.base.m_weight*spec_squared*self.all_ell_bins*self.beam_lm**2,axis=1)
                 
                 Cl_num.append(np.real(Cl_u1u2))
 
@@ -156,19 +154,10 @@ class PSpec():
         # Compute the Fisher matrix
         if verb: print("Seed %d: assembling Fisher matrix"%seed)
         if self.ones_mask:
-            fish = 0.5*np.real(np.einsum('ajk,bjk->ab',self.m_weight*np.asarray(Q_b_Sinv_a).conj(),np.asarray(Sinv_Q_b_Ainv_a))) # harmonic space sum
+            fish = 0.5*np.real(np.einsum('ajk,bjk->ab',self.base.m_weight*np.asarray(Q_b_Sinv_a).conj(),np.asarray(Sinv_Q_b_Ainv_a))) # harmonic space sum
         else:
             fish = 0.5*np.real(np.einsum('ajk,bjk->ab',self.base.A_pix*np.asarray(Q_b_Sinv_a).conj(),np.asarray(Sinv_Q_b_Ainv_a))) # real-space sum
         
-#         for i1 in range(self.Nl*len(self.fields)):
-#             for i2 in range(self.Nl*len(self.fields)):
-#                 if self.ones_mask:
-                    
-#                     fish[i1,i2] = 0.5*np.real(np.sum(self.m_weight*Q_b_Sinv_a[i1].conj()*Sinv_Q_b_Ainv_a[i2])) # harmonic space
-#                 else:
-#                     fish[i1,i2] = 0.5*np.real(self.base.A_pix*np.sum(Q_b_Sinv_a[i1].conj()*Sinv_Q_b_Ainv_a[i2])) # real-space
-
-        # Return matrix
         return fish
     
     def compute_fisher(self, N_it, N_cpus=1, verb=False):
@@ -211,9 +200,15 @@ class PSpec():
 
         # Apply normalization and restructure
         Cl_out = np.matmul(self.inv_fish,Cl_num)
-        Cl_out = [Cl_out[i*self.Nl:(i+1)*self.Nl] for i in range(len(self.fields))]
+        
+        # Create output dictionary of spectra
+        Cl_dict = {}
+        index = 0
+        for u in self.fields:
+            Cl_dict['%s'%u] = Cl_out[index:index+self.Nl]
+            index += self.Nl
 
-        return Cl_out
+        return Cl_dict
        
     ### IDEAL ESTIMATOR
     def Cl_numerator_ideal(self, data):
@@ -228,7 +223,7 @@ class PSpec():
             Cinv_data_lm = self.base.safe_divide(data_lm[0],self.base.Cl_lm[0])
 
             # Compute numerator (including beam)
-            Cl_num = 0.5*np.real(np.sum(self.m_weight*Cinv_data_lm*np.conj(Cinv_data_lm)*self.all_ell_bins*self.beam_lm**2,axis=1))/np.mean(self.mask**2)
+            Cl_num = 0.5*np.real(np.sum(self.base.m_weight*Cinv_data_lm*np.conj(Cinv_data_lm)*self.all_ell_bins*self.beam_lm**2,axis=1))/np.mean(self.mask**2)
             
         # Tensor case
         else:
@@ -246,7 +241,7 @@ class PSpec():
                 spec_squared = np.conj(Cinv_data_lm[u1])*Cinv_data_lm[u2]
                 
                 # Compute full numerator
-                Cl_u1u2 = 1./Delta2_u*np.sum(self.m_weight*spec_squared*self.all_ell_bins*self.beam_lm**2,axis=1)/np.mean(self.mask**2)
+                Cl_u1u2 = 1./Delta2_u*np.sum(self.base.m_weight*spec_squared*self.all_ell_bins*self.beam_lm**2,axis=1)/np.mean(self.mask**2)
                 
                 Cl_num.append(np.real(Cl_u1u2))
 
@@ -259,7 +254,7 @@ class PSpec():
         if not self.pol:
 
             # Compute normalization
-            fish_diag = 0.5*np.sum(self.base.safe_divide(self.m_weight,self.base.Cl_lm[0]**2)*self.all_ell_bins*self.beam_lm**4,axis=1)
+            fish_diag = 0.5*np.sum(self.base.safe_divide(self.base.m_weight,self.base.Cl_lm[0]**2)*self.all_ell_bins*self.beam_lm**4,axis=1)
             fish = np.diag(fish_diag)
             self.fish_ideal = fish
             self.inv_fish_ideal = np.diag(1./fish_diag)
@@ -286,7 +281,7 @@ class PSpec():
                     inv_cov_sq += self.base.inv_Cl_lm_mat[u2_p,u2]*self.base.inv_Cl_lm_mat[u1,u1_p]
                     
                     # Assemble fisher matrix
-                    fish_diag = 1./(Delta2_u*Delta2_u_p)*np.sum(self.m_weight*inv_cov_sq*self.all_ell_bins*self.beam_lm**4,axis=1)
+                    fish_diag = 1./(Delta2_u*Delta2_u_p)*np.sum(self.base.m_weight*inv_cov_sq*self.all_ell_bins*self.beam_lm**4,axis=1)
                     
                     # Add to output array
                     fish[i*self.Nl:(i+1)*self.Nl,j*self.Nl:(j+1)*self.Nl] = np.diag(np.real(fish_diag))
@@ -314,6 +309,13 @@ class PSpec():
 
         # Apply normalization and restructure
         Cl_out = np.matmul(self.inv_fish_ideal,Cl_num_ideal)
-        Cl_out = [Cl_out[i*self.Nl:(i+1)*self.Nl] for i in range(len(self.fields))]
         
-        return Cl_out
+        # Create output dictionary of spectra
+        Cl_dict = {}
+        index = 0
+        for u in self.fields:
+            Cl_dict['%s'%u] = Cl_out[index:index+self.Nl]
+            index += self.Nl
+
+        return Cl_dict
+       

@@ -10,7 +10,7 @@ import pywigxjpf as wig
 class TSpec():
     """
     Trispectrum estimation class. This takes the binning strategy as input and a base class. 
-    We also feed in a function that applies the S^-1 operator in real space.
+    We also feed in a function that applies the S^-1 operator.
 
     Note that we can additionally compute squeezed tetrahedra by setting l_bins_squeeze, giving a different lmax for short and long sides.
     We allow sides l2, l4 and L to have higher ell in this set-up (noting that l2 > l1, l4 > l3, and that {l1,l2,L} and {l3,l4,L} obey triangle conditions.)
@@ -34,6 +34,9 @@ class TSpec():
         self.l_bins = l_bins
         self.min_l = np.min(l_bins)
         self.Nl = len(l_bins)-1
+
+        print("USE SAME H FUNCTIONS FOR B & T? Put in base??")
+        print("Define parity on initialization?")
 
         if len(l_bins_squeeze)>0:
             self.l_bins_squeeze = l_bins_squeeze
@@ -254,7 +257,7 @@ class TSpec():
         A_plus = H_maps[bin1][0]*H2_maps[bin2][0]
         A_minus = H_maps[bin1][1]*H2_maps[bin2][1]
         
-        A_plus_lm, A_minus_lm = self.base.to_lm_spin(A_plus, A_minus, 2)
+        A_minus_lm = self.base.to_lm_spin(A_plus, A_minus, 2)[1]
         
         return A_minus_lm.conj()
     
