@@ -34,6 +34,7 @@ class PSpec():
         for f in fields:
             assert f in ['TT','TE','TB','EE','EB','BB'], "Unknown field '%s' supplied!"%f 
         assert len(fields)==len(np.unique(fields)), "Duplicate fields supplied!"
+        self.N_p = len(self.fields)*self.Nl
         
         if not self.pol and fields!=['TT']:
             print("## Polarization mode not turned on; setting fields to TT only!")
@@ -76,22 +77,19 @@ class PSpec():
             Wh_data_lm = self.base.to_lm(self.mask*self.applySinv(data))
 
         # Compute numerator (including beam)
-        if not self.pol:
-            Cl_num = 0.5*np.real(np.sum(self.base.m_weight*Wh_data_lm*np.conj(Wh_data_lm)*self.all_ell_bins*self.beam_lm**2,axis=1))
-        else:
-            Cl_num = []
-            for u in self.fields:
-                u1, u2 = self.base.indices[u[0]], self.base.indices[u[1]]
-                
-                Delta2_u = (u1==u2)+1.
-                
-                # Compute quadratic product of data matrices
-                spec_squared = np.conj(Wh_data_lm[u1])*Wh_data_lm[u2]
-                
-                # Compute full numerator
-                Cl_u1u2 = 1./Delta2_u*np.sum(self.base.m_weight*spec_squared*self.all_ell_bins*self.beam_lm**2,axis=1)
-                
-                Cl_num.append(np.real(Cl_u1u2))
+        Cl_num = []
+        for u in self.fields:
+            u1, u2 = self.base.indices[u[0]], self.base.indices[u[1]]
+            
+            Delta2_u = (u1==u2)+1.
+            
+            # Compute quadratic product of data matrices
+            spec_squared = np.conj(Wh_data_lm[u1])*Wh_data_lm[u2]
+            
+            # Compute full numerator
+            Cl_u1u2 = 1./Delta2_u*np.sum(self.base.m_weight*spec_squared*self.all_ell_bins*self.beam_lm**2,axis=1)
+            
+            Cl_num.append(np.real(Cl_u1u2))
 
         return np.asarray(Cl_num)
     
@@ -99,72 +97,87 @@ class PSpec():
         """This computes the contribution to the Fisher matrix from a single GRF simulation, created internally."""
 
         # Initialize output
-        fish = np.zeros((self.Nl*len(self.fields),self.Nl*len(self.fields)))
+        fish = np.zeros((self.N_p,self.N_p))
 
-        # Compute random realization with known power spectrum and filter
+        # Compute a random realization with known power spectrum and weight appropriately
+        if verb: print("Generating GRF")
         if self.ones_mask:
-            a_lm = self.base.generate_data(seed=seed+int(1e7), output_type='harmonic')
-            WSinv_a_lm = self.applySinv(a_lm, input_type='harmonic', output_type='harmonic')
-            WAinv_a_lm = self.applySinv(a_lm, input_type='harmonic', output_type='harmonic')
+            a_map = self.base.generate_data(seed=seed+int(1e7), output_type='harmonic')
         else:
-            a = self.base.generate_data(seed=seed+int(1e7))
-            WSinv_a_lm = self.base.to_lm(self.mask*self.applySinv(a))
-            WAinv_a_lm = self.base.to_lm(self.mask*self.base.applyAinv(a))
+            a_map = self.base.generate_data(seed=seed+int(1e7))
 
-        ## SCALAR
-        if not self.pol:
-            if verb: print("Seed %d: creating Q filter"%(seed))
+        # Define Q map code
+        def compute_Q2(weighting):
+            """
+            Assemble and return the Q2 maps in real- or harmonic-space, given a weighting scheme.
 
-            # Filter and transform to map space
+            The outputs are either Q(b) or WS^-1WQ(b).
+            """
+            if weighting=='Sinv':
+                weighting_function = self.applySinv
+            elif weighting=='Ainv':
+                weighting_function = self.base.applyAinv
+
+            # Weight maps appropriately
             if self.ones_mask:
-                Sinv_Q_b_Ainv_a = [self.applySinv(WAinv_a_lm*self.ell_bins[bin1]*self.beam_lm**2,input_type='harmonic',output_type='harmonic') for bin1 in range(self.Nl)]
-                Q_b_Sinv_a = [WSinv_a_lm*self.ell_bins[bin1]*self.beam_lm**2 for bin1 in range(self.Nl)]
+                WUinv_a_lm = weighting_function(a_map, input_type='harmonic', output_type='harmonic')
             else:
-                Sinv_Q_b_Ainv_a = [self.applySinv(self.mask*self.base.to_map(WAinv_a_lm*self.ell_bins[bin1]*self.beam_lm**2)) for bin1 in range(self.Nl)]
-                Q_b_Sinv_a = [self.mask*self.base.to_map(WSinv_a_lm*self.ell_bins[bin1]*self.beam_lm**2) for bin1 in range(self.Nl)]
+                WUinv_a_lm = self.base.to_lm(self.mask*weighting_function(a_map))
 
-        ## TENSOR
-        else:
+            # Now assemble and return Q2 maps
+            # Define arrays
+            Q_maps = np.zeros((self.N_p,len(a_map.ravel())),dtype='complex')
 
-            Sinv_Q_b_Ainv_a, Q_b_Sinv_a = [],[]
-
+            # Iterate over fields and bins
+            index = -1
             for u in self.fields:
-                if verb: print("Seed %d: creating Q filter for %s"%(seed,u))
                 u1, u2 = self.base.indices[u[0]], self.base.indices[u[1]]
 
                 Delta2_u = (u1==u2)+1.
 
                 # Compute T/E/B field
-                WSinv_a_lm_u, WAinv_a_lm_u = [np.zeros_like(WSinv_a_lm) for _ in range(2)]
-                for f in range(3):
-                    WSinv_a_lm_u[f] = WSinv_a_lm[u2]*(u1==f)+WSinv_a_lm[u1]*(u2==f)
-                    WAinv_a_lm_u[f] = WAinv_a_lm[u2]*(u1==f)+WAinv_a_lm[u1]*(u2==f)
+                WUinv_a_lm_u = np.zeros_like(WUinv_a_lm)
+                WUinv_a_lm_u[u1] += WUinv_a_lm[u2]
+                WUinv_a_lm_u[u2] += WUinv_a_lm[u1]
 
-                # Filter and transform to map space
                 for bin1 in range(self.Nl):
-                    if self.ones_mask:
-                       # Easier to store harmonic maps in this case
-                        Sinv_Q_b_Ainv_a.append(self.applySinv(WAinv_a_lm_u*self.ell_bins[bin1]*self.beam_lm**2/Delta2_u,input_type='harmonic',output_type='harmonic'))
-                        Q_b_Sinv_a.append(WSinv_a_lm_u*self.ell_bins[bin1]*self.beam_lm**2/Delta2_u)
-                    else:
-                       # Easier to store real-space maps in this case
-                        Sinv_Q_b_Ainv_a.append(self.applySinv(self.mask*self.base.to_map(WAinv_a_lm_u*self.ell_bins[bin1]*self.beam_lm**2/Delta2_u)))
-                        Q_b_Sinv_a.append(self.mask*self.base.to_map(WSinv_a_lm_u*self.ell_bins[bin1]*self.beam_lm**2/Delta2_u))
+                    index += 1
 
-        # Compute the Fisher matrix
-        if verb: print("Seed %d: assembling Fisher matrix"%seed)
-        if self.ones_mask:
-            fish = 0.5*np.real(np.einsum('ajk,bjk->ab',self.base.m_weight*np.asarray(Q_b_Sinv_a).conj(),np.asarray(Sinv_Q_b_Ainv_a))) # harmonic space sum
-        else:
-            fish = 0.5*np.real(np.einsum('ajk,bjk->ab',self.base.A_pix*np.asarray(Q_b_Sinv_a).conj(),np.asarray(Sinv_Q_b_Ainv_a))) # real-space sum
-        
+                    # Define summand
+                    summand = WUinv_a_lm_u*self.ell_bins[bin1]*self.beam_lm**2/Delta2_u
+
+                    # Optionally apply weighting and add to output arrays in real or harmonic space
+                    if weighting=='Ainv':
+                        if self.ones_mask:
+                            Q_maps[index] = self.applySinv(summand,input_type='harmonic',output_type='harmonic').ravel()
+                        else:
+                            Q_maps[index] = (self.mask*self.applySinv(self.mask*self.base.to_map(summand))).ravel()
+                    elif weighting=='Sinv':
+                        if self.ones_mask:
+                            Q_maps[index] = (self.base.m_weight*summand).ravel()
+                        else:
+                            Q_maps[index] = self.base.A_pix*self.base.to_map(summand).ravel()
+            return Q_maps                    
+
+        if verb: print("Computing Q2 map for S^-1 weighting")
+        Q2_Sinv = compute_Q2('Sinv')
+        if verb: print("Computing Q2 map for A^-1 weighting")
+        Q2_Ainv = compute_Q2('Ainv')
+
+        # Assemble Fisher matrix
+        if verb: print("Assembling Fisher matrix\n")
+
+        # Compute Fisher matrix as an outer product
+        fish += 0.5*np.real(Q2_Sinv.conj()@(Q2_Ainv.T))
+
         return fish
-    
+
+
     def compute_fisher(self, N_it, N_cpus=1, verb=False):
         """Compute the Fisher matrix using N_it realizations. If N_cpus > 1, this parallelizes the operations."""
 
         # Initialize output
-        fish = np.zeros((self.Nl*len(self.fields),self.Nl*len(self.fields)))
+        fish = np.zeros((self.N_p,self.N_p))
 
         global _iterable
         def _iterable(seed):
@@ -195,8 +208,7 @@ class PSpec():
             raise Exception("Need to compute Fisher matrix first!")
         
         # Compute numerator
-        Cl_num = self.Cl_numerator(data)
-        if self.pol: Cl_num = np.concatenate(Cl_num)
+        Cl_num = np.concatenate(self.Cl_numerator(data))
 
         # Apply normalization and restructure
         Cl_out = np.matmul(self.inv_fish,Cl_num)
@@ -214,80 +226,55 @@ class PSpec():
     def Cl_numerator_ideal(self, data):
         """Compute the numerator of the idealized power spectrum estimator for all fields of interest. We normalize by < mask^2 >.
         """
-        # Transform to harmonic space
-        data_lm = self.base.to_lm(data)
+        # Transform to harmonic space and normalize by C_th^{-1}
+        Cinv_data_lm = np.einsum('ijk,jk->ik',self.base.inv_Cl_lm_mat,self.base.to_lm(data),order='C')
         
-        # Scalar case
-        if not self.pol:
-            # Normalize data by 1/C_th
-            Cinv_data_lm = self.base.safe_divide(data_lm[0],self.base.Cl_lm[0])
-
-            # Compute numerator (including beam)
-            Cl_num = 0.5*np.real(np.sum(self.base.m_weight*Cinv_data_lm*np.conj(Cinv_data_lm)*self.all_ell_bins*self.beam_lm**2,axis=1))/np.mean(self.mask**2)
+        # Compute numerator (including beam)
+        Cl_num = []
+        for u in self.fields:
+            u1, u2 = self.base.indices[u[0]], self.base.indices[u[1]]
             
-        # Tensor case
-        else:
-            # Normalize by C_th^-1
-            Cinv_data_lm = np.einsum('ijk,jk->ik',self.base.inv_Cl_lm_mat,data_lm,order='C')
-                        
-            # Compute numerator (including beam)
-            Cl_num = []
-            for u in self.fields:
-                u1, u2 = self.base.indices[u[0]], self.base.indices[u[1]]
-                
-                Delta2_u = (u1==u2)+1.
-                
-                # Compute quadratic product of data matrices
-                spec_squared = np.conj(Cinv_data_lm[u1])*Cinv_data_lm[u2]
-                
-                # Compute full numerator
-                Cl_u1u2 = 1./Delta2_u*np.sum(self.base.m_weight*spec_squared*self.all_ell_bins*self.beam_lm**2,axis=1)/np.mean(self.mask**2)
-                
-                Cl_num.append(np.real(Cl_u1u2))
+            Delta2_u = (u1==u2)+1.
+            
+            # Compute quadratic product of data matrices
+            spec_squared = np.conj(Cinv_data_lm[u1])*Cinv_data_lm[u2]
+            
+            # Compute full numerator
+            Cl_u1u2 = 1./Delta2_u*np.sum(self.base.m_weight*spec_squared*self.all_ell_bins*self.beam_lm**2,axis=1)/np.mean(self.mask**2)
+            
+            Cl_num.append(np.real(Cl_u1u2))
 
         return np.asarray(Cl_num)
                 
     def compute_fisher_ideal(self):
         """This computes the idealized Fisher matrix for the power spectrum."""
         
-        # Scalar case
-        if not self.pol:
-
-            # Compute normalization
-            fish_diag = 0.5*np.sum(self.base.safe_divide(self.base.m_weight,self.base.Cl_lm[0]**2)*self.all_ell_bins*self.beam_lm**4,axis=1)
-            fish = np.diag(fish_diag)
-            self.fish_ideal = fish
-            self.inv_fish_ideal = np.diag(1./fish_diag)
+        # Define output array
+        fish = np.zeros((len(self.fields)*self.Nl,len(self.fields)*self.Nl))
         
-        # Tensor case
-        else:
+        # Iterate over fields
+        for i,u in enumerate(self.fields):
             
-            # Define output array
-            fish = np.zeros((len(self.fields)*self.Nl,len(self.fields)*self.Nl))
+            u1, u2 = self.base.indices[u[0]], self.base.indices[u[1]]
+            Delta2_u = (u1==u2)+1.
             
-            # Iterate over fields
-            for i,u in enumerate(self.fields):
-                
-                u1, u2 = self.base.indices[u[0]], self.base.indices[u[1]]
-                Delta2_u = (u1==u2)+1.
-                
-                for j,u_p in enumerate(self.fields):
-                
-                    u1_p, u2_p = self.base.indices[u_p[0]], self.base.indices[u_p[1]]
-                    Delta2_u_p = (u1_p==u2_p)+1.
-                
-                    # Compute product of two inverse covariances with permutations
-                    inv_cov_sq = self.base.inv_Cl_lm_mat[u2_p,u1]*self.base.inv_Cl_lm_mat[u2,u1_p]
-                    inv_cov_sq += self.base.inv_Cl_lm_mat[u2_p,u2]*self.base.inv_Cl_lm_mat[u1,u1_p]
-                    
-                    # Assemble fisher matrix
-                    fish_diag = 1./(Delta2_u*Delta2_u_p)*np.sum(self.base.m_weight*inv_cov_sq*self.all_ell_bins*self.beam_lm**4,axis=1)
-                    
-                    # Add to output array
-                    fish[i*self.Nl:(i+1)*self.Nl,j*self.Nl:(j+1)*self.Nl] = np.diag(np.real(fish_diag))
+            for j,u_p in enumerate(self.fields):
             
-            self.fish_ideal = fish
-            self.inv_fish_ideal = np.linalg.inv(self.fish_ideal)
+                u1_p, u2_p = self.base.indices[u_p[0]], self.base.indices[u_p[1]]
+                Delta2_u_p = (u1_p==u2_p)+1.
+            
+                # Compute product of two inverse covariances with permutations
+                inv_cov_sq = self.base.inv_Cl_lm_mat[u2_p,u1]*self.base.inv_Cl_lm_mat[u2,u1_p]
+                inv_cov_sq += self.base.inv_Cl_lm_mat[u2_p,u2]*self.base.inv_Cl_lm_mat[u1,u1_p]
+                
+                # Assemble fisher matrix
+                fish_diag = 1./(Delta2_u*Delta2_u_p)*np.sum(self.base.m_weight*inv_cov_sq*self.all_ell_bins*self.beam_lm**4,axis=1)
+                
+                # Add to output array
+                fish[i*self.Nl:(i+1)*self.Nl,j*self.Nl:(j+1)*self.Nl] = np.diag(np.real(fish_diag))
+        
+        self.fish_ideal = fish
+        self.inv_fish_ideal = np.linalg.inv(self.fish_ideal)
         
         return fish
     
@@ -304,8 +291,7 @@ class PSpec():
             self.compute_fisher_ideal()
 
         # Compute numerator
-        Cl_num_ideal = self.Cl_numerator_ideal(data)
-        if self.pol: Cl_num_ideal = np.concatenate(Cl_num_ideal)
+        Cl_num_ideal = np.concatenate(self.Cl_numerator_ideal(data))
 
         # Apply normalization and restructure
         Cl_out = np.matmul(self.inv_fish_ideal,Cl_num_ideal)

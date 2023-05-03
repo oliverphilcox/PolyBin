@@ -103,6 +103,10 @@ class PolyBin():
             # Invert matrix for each l,m
             self.inv_Cl_lm_mat = np.moveaxis(np.linalg.inv(Cl_lm_mat),[0,1,2],[2,0,1])
             self.inv_Cl_mat = np.moveaxis(np.linalg.inv(Cl_mat),[0,1,2],[2,0,1])
+        else:
+            # Create trivial arrays for single field
+            self.inv_Cl_lm_mat = (1./self.Cl_lm[0]).reshape(1,1,-1)
+            self.inv_Cl_mat = (1./self.Cl[0]).reshape(1,1,-1)
                     
         # Define 3j calculation
         wig.wig_table_init(self.lmax*2,9)
@@ -119,7 +123,7 @@ class PolyBin():
         """Convert from map-space to harmonic-space. If three fields are supplied, this transforms TQU -> TEB.
         
         This uses either HEALPix or Libsharp, depending on the backend chosen."""
-        self.n_SHTs_forward += len(input_map)
+        self.n_SHTs_forward += 1+(len(input_map)==3)
         if self.backend=='healpix':
             if len(input_map)==3:
                 return healpy.map2alm(input_map, pol=True, iter=0) # no iteration, to match Libsharp
@@ -137,7 +141,7 @@ class PolyBin():
         """Convert from harmonic-space to map-space. If three fields are supplied, this transforms TEB -> TQU.
         
         This uses either HEALPix or Libsharp, depending on the backend chosen."""
-        self.n_SHTs_reverse += len(input_lm)
+        self.n_SHTs_reverse += 1+(len(input_lm)==3)
         if self.backend=='healpix':
             if len(input_lm)==3:
                 return healpy.alm2map(input_lm, self.Nside, pol=True)
@@ -158,7 +162,7 @@ class PolyBin():
         """
         assert spin>=1, "Spin must be positive!"
         assert type(spin)==int, "Spin must be an integer!"
-        self.n_SHTs_forward += 2
+        self.n_SHTs_forward += 1
         
         # Define inputs
         map_inputs = [np.real((input_map_plus+input_map_minus)/2.), np.real((input_map_plus-input_map_minus)/(2.0j))]
@@ -183,7 +187,7 @@ class PolyBin():
         assert spin>=1, "Spin must be positive!"
         assert type(spin)==int, "Spin must be an integer!"
         
-        self.n_SHTs_reverse += 2
+        self.n_SHTs_reverse += 1
         
         # Define inputs
         lm_inputs = [-(input_lm_plus+(-1)**spin*input_lm_minus)/2.,-(input_lm_plus-(-1)**spin*input_lm_minus)/(2.0j)]
@@ -257,11 +261,7 @@ class PolyBin():
                 if Cl_input[f][i]==0: Cl_input_lm[f][self.l_arr==i] = 0.
         
         # Compute gradient map
-        if self.pol:
-            Cinv_lm = np.einsum('ijk,jk->ik',self.inv_Cl_lm_mat,initial_lm,order='C')
-        else:
-            Cinv_lm = [self.safe_divide(initial_lm[0],Cl_input_lm[0])]
-        
+        Cinv_lm = np.einsum('ijk,jk->ik',self.inv_Cl_lm_mat,initial_lm,order='C')
         bCinv_lm = np.sum([b_input(self.l_arr)[i]*Cinv_lm[i] for i in range(len(Cinv_lm))],axis=0)
         
         # Transform to map space
@@ -317,10 +317,7 @@ class PolyBin():
         else: input_map_lm = input_map.copy()
             
         # Divide by covariance
-        if not self.pol:
-            output = [self.safe_divide(input_map_lm[0],self.Cl_lm[0])]
-        else:
-            output = np.einsum('ijk,jk->ik',self.inv_Cl_lm_mat,input_map_lm,order='C')
+        output = np.einsum('ijk,jk->ik',self.inv_Cl_lm_mat,input_map_lm,order='C')
         
         # Optionally return to map-space
         if output_type=='map': return self.to_map(output)
