@@ -69,8 +69,6 @@ class TSpec():
         
         # Check correct parities being used
         assert parity in ['even','odd','both'], "Parity must be one of 'even', 'odd' or 'both'!"
-        if not self.pol and parity!='even':
-            print("Caution: scalar 3-point functions can't probe parity-odd primordial physics!")
         if parity=='even':
             self.chi_arr = [1]
         elif parity=='odd':
@@ -80,6 +78,8 @@ class TSpec():
         
         if np.max(self.l_bins_squeeze)>base.lmax:
             raise Exception("Maximum l is larger than HEALPix resolution!")
+        if np.max(self.l_bins)>base.lmax//2:
+            print("## Caution: Maximum l is greater than HEALPix-lmax/2; this might cause boundary effects.")
         print("Binning: %d bins in [%d, %d]"%(self.Nl,self.min_l,np.max(self.l_bins)))
         if self.Nl_squeeze!=self.Nl:
             print("Squeezed binning: %d bins in [%d, %d]"%(self.Nl_squeeze,self.min_l,np.max(self.l_bins_squeeze)))
@@ -697,7 +697,7 @@ class TSpec():
                                         index += 1
 
                                         # Create harmonic-space Q^X_lm maps
-                                        tmp_Q = np.zeros((1+2*self.pol,2,len(WUinv_a_lms[0].ravel())),dtype='complex')
+                                        tmp_Q = np.zeros((1+2*self.pol,2,len(WUinv_a_lms[0][0])),dtype='complex')
 
                                         ## Add all permutations (noting that we have already symmetrized over the two indices of A)
                                         for HA_lms in [HxAyz_lms, HyAxz_lms, HzAxy_lms]:

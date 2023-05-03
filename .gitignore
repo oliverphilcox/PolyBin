@@ -19,6 +19,7 @@ nano *.ipynb
 *.txt'
 *.jl
 *.npz
+*old*
 old/
 old/*
 *__pycache__*

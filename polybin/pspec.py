@@ -42,6 +42,8 @@ class PSpec():
 
         if np.max(self.l_bins)>base.lmax:
             raise Exception("Maximum l is larger than HEALPix resolution!")
+        if np.max(self.l_bins)>base.lmax//2:
+            print("## Caution: Maximum l is greater than HEALPix-lmax/2; this might cause boundary effects.")
         print("Binning: %d bins in [%d, %d]"%(self.Nl,self.min_l,np.max(self.l_bins)))
         print("Fields: %s"%fields)
         
@@ -159,9 +161,9 @@ class PSpec():
                             Q_maps[index] = self.base.A_pix*self.base.to_map(summand).ravel()
             return Q_maps                    
 
-        if verb: print("Computing Q2 map for S^-1 weighting")
+        if verb: print("\nComputing map for S^-1 weighting")
         Q2_Sinv = compute_Q2('Sinv')
-        if verb: print("Computing Q2 map for A^-1 weighting")
+        if verb: print("\nComputing Q2 map for A^-1 weighting")
         Q2_Ainv = compute_Q2('Ainv')
 
         # Assemble Fisher matrix

@@ -70,6 +70,8 @@ class BSpec():
 
         if np.max(self.l_bins_squeeze)>base.lmax:
             raise Exception("Maximum l is larger than HEALPix resolution!")
+        if np.max(self.l_bins)>base.lmax//2:
+            print("## Caution: Maximum l is greater than HEALPix-lmax/2; this might cause boundary effects.")
         print("Binning: %d bins in [%d, %d]"%(self.Nl,self.min_l,np.max(self.l_bins)))
         if self.Nl_squeeze!=self.Nl:
             print("Squeezed binning: %d bins in [%d, %d]"%(self.Nl_squeeze,self.min_l,np.max(self.l_bins_squeeze)))
@@ -453,7 +455,7 @@ class BSpec():
 
             # Now assemble and return Q3 maps
             # Define arrays
-            Q_maps = np.zeros((self.N_b,(1+2*self.pol)*len(a_maps[0].ravel())),dtype='complex')
+            Q_maps = np.zeros((self.N_b,len(a_maps[0].ravel())),dtype='complex')
 
             # Iterate over fields and bins
             index = -1
@@ -472,7 +474,7 @@ class BSpec():
                             index += 1
 
                             # Create harmonic space Q^X_lm maps
-                            tmp_Q = np.zeros((1+2*self.pol,2,len(WUinv_a_lm[0].ravel())),dtype='complex')
+                            tmp_Q = np.zeros((1+2*self.pol,2,len(WUinv_a_lm[0])),dtype='complex')
                             tmp_Q[u1] += 1./3./self.sym_factor[index]*self.ell_bins[bin1]*self.beam_lm*HH_maps[u3][u2][bin3][bin2]
                             tmp_Q[u2] += 1./3./self.sym_factor[index]*self.ell_bins[bin2]*self.beam_lm*HH_maps[u3][u1][bin3][bin1]
                             tmp_Q[u3] += 1./3./self.sym_factor[index]*self.ell_bins[bin3]*self.beam_lm*HH_maps[u2][u1][bin2][bin1]
@@ -669,7 +671,7 @@ class BSpec():
             u1, u2, u3 = [self.base.indices[u[i]] for i in range(3)]
             p_u = np.product([self.base.parities[u[i]] for i in range(3)])
 
-            if verb: print("Computing %s fisher matrix row"%(u))
+            if verb: print("Computing %s fisher matrix components"%(u))
 
             for bin1 in range(self.Nl):
                 for bin2 in range(self.Nl_squeeze):
