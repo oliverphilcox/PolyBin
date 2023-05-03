@@ -89,7 +89,7 @@ class PSpec():
             spec_squared = np.conj(Wh_data_lm[u1])*Wh_data_lm[u2]
             
             # Compute full numerator
-            Cl_u1u2 = 1./Delta2_u*np.sum(self.base.m_weight*spec_squared*self.all_ell_bins*self.beam_lm**2,axis=1)
+            Cl_u1u2 = 1./Delta2_u*np.sum(self.base.m_weight*spec_squared*self.all_ell_bins*self.beam_lm[u1]*self.beam_lm[u2],axis=1)
             
             Cl_num.append(np.real(Cl_u1u2))
 
@@ -146,7 +146,7 @@ class PSpec():
                     index += 1
 
                     # Define summand
-                    summand = WUinv_a_lm_u*self.ell_bins[bin1]*self.beam_lm**2/Delta2_u
+                    summand = WUinv_a_lm_u*self.ell_bins[bin1]*self.beam_lm[u1]*self.beam_lm[u2]/Delta2_u
 
                     # Optionally apply weighting and add to output arrays in real or harmonic space
                     if weighting=='Ainv':
@@ -242,7 +242,7 @@ class PSpec():
             spec_squared = np.conj(Cinv_data_lm[u1])*Cinv_data_lm[u2]
             
             # Compute full numerator
-            Cl_u1u2 = 1./Delta2_u*np.sum(self.base.m_weight*spec_squared*self.all_ell_bins*self.beam_lm**2,axis=1)/np.mean(self.mask**2)
+            Cl_u1u2 = 1./Delta2_u*np.sum(self.base.m_weight*spec_squared*self.all_ell_bins*self.beam_lm[u1]*self.beam_lm[u2],axis=1)/np.mean(self.mask**2)
             
             Cl_num.append(np.real(Cl_u1u2))
 
@@ -270,7 +270,7 @@ class PSpec():
                 inv_cov_sq += self.base.inv_Cl_lm_mat[u2_p,u2]*self.base.inv_Cl_lm_mat[u1,u1_p]
                 
                 # Assemble fisher matrix
-                fish_diag = 1./(Delta2_u*Delta2_u_p)*np.sum(self.base.m_weight*inv_cov_sq*self.all_ell_bins*self.beam_lm**4,axis=1)
+                fish_diag = 1./(Delta2_u*Delta2_u_p)*np.sum(self.base.m_weight*inv_cov_sq*self.all_ell_bins*self.beam_lm[u1]*self.beam_lm[u2]*self.beam_lm[u1_p]*self.beam_lm[u2_p],axis=1)
                 
                 # Add to output array
                 fish[i*self.Nl:(i+1)*self.Nl,j*self.Nl:(j+1)*self.Nl] = np.diag(np.real(fish_diag))

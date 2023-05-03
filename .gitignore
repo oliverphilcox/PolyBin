@@ -11,6 +11,7 @@ testing/*
 polybin/*old*
 planck
 planck/*
+planck_public/*setup*
 planck_trispectrum/*
 planck_trispectrum
 models/*

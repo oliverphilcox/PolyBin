@@ -292,7 +292,7 @@ class TSpec():
         """
         H_pm1_maps = []
         for bin1 in range(self.Nl_squeeze):
-            H_pm1_maps.append([np.asarray([[1],[-1]])*self.base.to_map_spin(self.ell_bins[bin1]*self.beam_lm*h_lm[i].conj(),-1.*self.ell_bins[bin1]*self.beam_lm*h_lm[i].conj(),1) for i in range(len(h_lm))])
+            H_pm1_maps.append([np.asarray([[1],[-1]])*self.base.to_map_spin(self.ell_bins[bin1]*self.beam_lm[i]*h_lm[i].conj(),-1.*self.ell_bins[bin1]*self.beam_lm[i]*h_lm[i].conj(),1) for i in range(len(h_lm))])
         return H_pm1_maps
 
     def _compute_A_lms(self, H_maps1, H_maps2 = []):
@@ -701,10 +701,10 @@ class TSpec():
 
                                         ## Add all permutations (noting that we have already symmetrized over the two indices of A)
                                         for HA_lms in [HxAyz_lms, HyAxz_lms, HzAxy_lms]:
-                                            tmp_Q[u1] -= 1./self.sym_factor[index]*self.ell_bins[bin1]*self.beam_lm*HA_lms[u2][u4][u3][bin2][bin4][bin3][binL].conj()
-                                            tmp_Q[u2] -= 1./self.sym_factor[index]*self.ell_bins[bin2]*self.beam_lm*HA_lms[u1][u4][u3][bin1][bin4][bin3][binL].conj()
-                                            tmp_Q[u3] -= 1./self.sym_factor[index]*self.ell_bins[bin3]*self.beam_lm*HA_lms[u4][u2][u1][bin4][bin2][bin1][binL].conj()
-                                            tmp_Q[u4] -= 1./self.sym_factor[index]*self.ell_bins[bin4]*self.beam_lm*HA_lms[u3][u2][u1][bin3][bin2][bin1][binL].conj()
+                                            tmp_Q[u1] -= 1./self.sym_factor[index]*self.ell_bins[bin1]*self.beam_lm[u1]*HA_lms[u2][u4][u3][bin2][bin4][bin3][binL].conj()
+                                            tmp_Q[u2] -= 1./self.sym_factor[index]*self.ell_bins[bin2]*self.beam_lm[u2]*HA_lms[u1][u4][u3][bin1][bin4][bin3][binL].conj()
+                                            tmp_Q[u3] -= 1./self.sym_factor[index]*self.ell_bins[bin3]*self.beam_lm[u3]*HA_lms[u4][u2][u1][bin4][bin2][bin1][binL].conj()
+                                            tmp_Q[u4] -= 1./self.sym_factor[index]*self.ell_bins[bin4]*self.beam_lm[u4]*HA_lms[u3][u2][u1][bin3][bin2][bin1][binL].conj()
                                             
                                         # Define chi = +- 1 pieces
                                         tmp_Q_p = tmp_Q[:,0]+p_u*tmp_Q[:,1] # chi = 1
@@ -872,7 +872,7 @@ class TSpec():
                 Cinv_l_empirical1 = []
                 for u2 in range(u1+1):
                     Cinv_data_lm_sq = 0.5*(Cinv_data_lm[u1]*np.conj(Cinv_data_lm[u2])+Cinv_data_lm[u2]*np.conj(Cinv_data_lm[u1]))*self.base.m_weight
-                    Cinv_l_empirical1.append([np.real(np.sum(Cinv_data_lm_sq[self.base.l_arr==l]*self.beam[l]**2)/(2*l+1)) for l in range(np.max(self.l_bins_squeeze))])
+                    Cinv_l_empirical1.append([np.real(np.sum(Cinv_data_lm_sq[self.base.l_arr==l]*self.beam[u1][l]*self.beam[u2][l])/(2*l+1)) for l in range(np.max(self.l_bins_squeeze))])
                 Cinv_l_empirical.append(Cinv_l_empirical1)            
         
         # Define 4-, 2- and 0-field arrays
@@ -931,13 +931,7 @@ class TSpec():
                                     value2, value0 = 0., 0.
                                     for l1 in range(self.l_bins[bin1],self.l_bins[bin1+1]):
 
-                                        # Compute sum over l1
-                                        Cinvsq_l1 = np.sum(Cinv_data_lm_sq[self.base.l_arr==l1]*self.beam[l1]**2)
-
                                         for l2 in range(self.l_bins_squeeze[bin2],self.l_bins_squeeze[bin2+1]):
-
-                                            # Compute sum over l2
-                                            Cinvsq_l2 = np.sum(Cinv_data_lm_sq[self.base.l_arr==l2]*self.beam[l2]**2)
 
                                             for L in range(self.L_bins[binL],self.L_bins[binL+1]):
                                                 if L<abs(l1-l2) or L>l1+l2: continue
@@ -948,13 +942,13 @@ class TSpec():
                                                 pref = (2*L+1.)*(2*l1+1.)*(2*l2+1.)/(4.*np.pi)*tjs*(-1.)**(l1+l2+L)
                                                 
                                                 # 2-field contribution
-                                                value2 -= pref*Cinv_l_empirical[max([u2,u4])][min([u2,u4])][l2]*self.base.inv_Cl_mat[u3,u1][l1]*self.beam[l1]**2*(bin1==bin3)*(bin2==bin4)
-                                                value2 -= pref*Cinv_l_empirical[max([u1,u3])][min([u1,u3])][l1]*self.base.inv_Cl_mat[u4,u2][l2]*self.beam[l2]**2*(bin1==bin3)*(bin2==bin4)
-                                                value2 -= pref*Cinv_l_empirical[max([u2,u3])][min([u2,u3])][l2]*self.base.inv_Cl_mat[u4,u1][l1]*self.beam[l1]**2*(bin1==bin4)*(bin2==bin3)
-                                                value2 -= pref*Cinv_l_empirical[max([u1,u4])][min([u1,u4])][l1]*self.base.inv_Cl_mat[u3,u2][l2]*self.beam[l2]**2*(bin1==bin4)*(bin2==bin3)
+                                                value2 -= pref*Cinv_l_empirical[max([u2,u4])][min([u2,u4])][l2]*self.base.inv_Cl_mat[u3,u1][l1]*self.beam[u1][l1]*self.beam[u3][l1]*(bin1==bin3)*(bin2==bin4)
+                                                value2 -= pref*Cinv_l_empirical[max([u1,u3])][min([u1,u3])][l1]*self.base.inv_Cl_mat[u4,u2][l2]*self.beam[u2][l2]*self.beam[u4][l2]*(bin1==bin3)*(bin2==bin4)
+                                                value2 -= pref*Cinv_l_empirical[max([u2,u3])][min([u2,u3])][l2]*self.base.inv_Cl_mat[u4,u1][l1]*self.beam[u1][l1]*self.beam[u4][l1]*(bin1==bin4)*(bin2==bin3)
+                                                value2 -= pref*Cinv_l_empirical[max([u1,u4])][min([u1,u4])][l1]*self.base.inv_Cl_mat[u3,u2][l2]*self.beam[u2][l2]*self.beam[u3][l2]*(bin1==bin4)*(bin2==bin3)
                                                 # 0-field contribution
-                                                value0 += pref*self.base.inv_Cl_mat[u3,u1][l1]*self.base.inv_Cl_mat[u4,u2][l2]*self.beam[l1]**2*self.beam[l2]**2*(bin1==bin3)*(bin2==bin4)
-                                                value0 += pref*self.base.inv_Cl_mat[u4,u1][l1]*self.base.inv_Cl_mat[u3,u2][l2]*self.beam[l1]**2*self.beam[l2]**2*(bin1==bin4)*(bin2==bin3)
+                                                value0 += pref*self.base.inv_Cl_mat[u3,u1][l1]*self.base.inv_Cl_mat[u4,u2][l2]*self.beam[u1][l1]*self.beam[u3][l1]*self.beam[u2][l2]*self.beam[u4][l2]*(bin1==bin3)*(bin2==bin4)
+                                                value0 += pref*self.base.inv_Cl_mat[u4,u1][l1]*self.base.inv_Cl_mat[u3,u2][l2]*self.beam[u1][l1]*self.beam[u4][l1]*self.beam[u3][l2]*self.beam[u2][l2]*(bin1==bin4)*(bin2==bin3)
                                         t2_num_ideal[index] = value2
                                         t0_num_ideal[index] = value0
 
@@ -1104,7 +1098,7 @@ class TSpec():
                                                                                 tj1234 = tj12*self.threej(l3,l4,L)
                                                                                 if tj1234==0: continue
 
-                                                                                norm = (2.*l1+1.)*(2.*l2+1.)*(2.*l3+1.)*(2.*l4+1.)*(2.*L+1.)/(4.*np.pi)**2*self.beam[l1]**2*self.beam[l2]**2*self.beam[l3]**2*self.beam[l4]**2
+                                                                                norm = (2.*l1+1.)*(2.*l2+1.)*(2.*l3+1.)*(2.*l4+1.)*(2.*L+1.)/(4.*np.pi)**2*self.beam[u1][l1]*self.beam[u1_p][l1]*self.beam[u2][l2]*self.beam[u2_p][l2]*self.beam[u3][l3]*self.beam[u3_p][l3]*self.beam[u4][l4]*self.beam[u4_p][l4]
 
                                                                                 Cinv_bin = lambda i,j,l: self.base.inv_Cl_mat[[u1,u2,u3,u4][i],[u1_p,u2_p,u3_p,u4_p][j]][l]*([bin1,bin2,bin3,bin4][i]==[bin1_p,bin2_p,bin3_p,bin4_p][j])
 

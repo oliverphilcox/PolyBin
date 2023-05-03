@@ -13,7 +13,7 @@ class PolyBin():
     Inputs:
     - Nside: HEALPix Nside
     - Cl: Fiducial power spectra (including beam and noise). This is used for creating synthetic maps for the optimal estimators, and, optionally, generating GRFs to test on.
-    - beam: Beam present in the signal maps. This will be set to unity if unspecified, else deconvolved out the signal.
+    - beam: Beam present in the signal maps. This will be set to unity if unspecified, else deconvolved out the signal. If polarization is set, this contains two components: (Temperature-Beam, Polarization-Beam)
     - include_pixel_window: Whether to account for the HEALPix pixel window function (usually true, unless data is generated at low Nside).
     - pol: Whether to include spin-2 fields in the computations. If true, Cl should be a list of six spectra: [ClTT, ClTE, ClTB, ClEE, ClEB, ClBB]. If false, Cl contains only ClTT.
     - backend: Which backend to use to compute spherical harmonic transforms. Options: "healpix" [requires healpy] or "libsharp" [requires pixell].   
@@ -34,10 +34,15 @@ class PolyBin():
             self.Cl = [Cl['TT']]
             self.n_Cl = 1
         if len(beam)==0:
-            self.beam = 1.+0.*self.Cl[0]
+            self.beam = [1.+0.*self.Cl[0] for _ in range(1+2*self.pol)]
         else:
-            self.beam = beam.copy()
-        
+            if self.pol:
+                assert len(beam)==2, "Beam must contain temperature and polarization components"
+                self.beam = [beam[0],beam[1],beam[1]]
+            else:
+                assert (len(beam)==1 or len(beam)==len(Cl['TT'])), "Beam must contain the same ells as Cl"
+                self.beam = [np.asarray(beam)]
+                
         # Define indices for T, E, B and their parities
         self.indices = {'T':0,'E':1,'B':2}
         self.parities = {'T':1,'E':1,'B':-1}
@@ -45,9 +50,22 @@ class PolyBin():
         # Account for pixel window if necessary
         if include_pixel_window:
             print("Pixel windows can be different for polarization??")
-            pixwin = healpy.pixwin(self.Nside)
-            self.beam *= pixwin
-            self.Cl = [self.Cl[i]*pixwin**2 for i in range(self.n_Cl)]
+            if not self.pol:
+                pixwin = healpy.pixwin(self.Nside, pol=False)
+                self.beam[0] *= pixwin
+                self.Cl[0] *= pixwin**2
+            else:
+                pixwinT, pixwinP = healpy.pixwin(self.Nside, pol=True)
+                pixwinP[:2] = 1. # avoid zero errors
+                self.beam[0] *= pixwinT
+                self.beam[1] *= pixwinP
+                self.beam[2] *= pixwinP
+                self.Cl[0] *= pixwinT**2 # TT
+                self.Cl[1] *= pixwinT*pixwinP # TE
+                self.Cl[2] *= pixwinT*pixwinP # TB
+                self.Cl[3] *= pixwinP**2 # EE
+                self.Cl[4] *= pixwinP**2 # EB
+                self.Cl[5] *= pixwinP**2 # BB
         else:
             print("## Caution: not accounting for pixel window function")
         
@@ -74,18 +92,22 @@ class PolyBin():
         # Apply Cl and beam to grid (including beam and noise)
         ls = np.arange(self.lmax+1)
         self.Cl_lm = [InterpolatedUnivariateSpline(ls, self.Cl[i])(self.l_arr) for i in range(self.n_Cl)]
-        self.beam_lm = InterpolatedUnivariateSpline(ls, self.beam)(self.l_arr)
+        self.beam_lm = [InterpolatedUnivariateSpline(ls, self.beam[i])(self.l_arr) for i in range(1+2*self.pol)]
 
         for i in [0,3,5]:
             if not self.pol and i>0: continue
             if (self.Cl[i]==0).sum()>0:
                 print("## Caution: Zeros detected in (auto) input Cl - this may cause problems for inversion!")
-        if (self.beam==0).sum()>0:
+        if (self.beam[0]==0).sum()>0:
             print("## Caution: Zeros detected in input beam - this may cause problems for inversion!")
+        if self.pol:
+            if (self.beam[1]==0).sum()>0:
+                print("## Caution: Zeros detected in input beam - this may cause problems for inversion!")
         for i in range(self.lmax+1):
             for f in range(self.n_Cl):
                 if self.Cl[f][i]==0: self.Cl_lm[f][self.l_arr==i] = 0.
-            if self.beam[i]==0: self.beam_lm[self.l_arr==i] = 0.
+            for f in range(1+2*self.pol):
+                if self.beam[f][i]==0: self.beam_lm[f][self.l_arr==i] = 0.
                     
         # Define C^-1 matrix
         if self.pol:

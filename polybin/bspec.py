@@ -475,9 +475,9 @@ class BSpec():
 
                             # Create harmonic space Q^X_lm maps
                             tmp_Q = np.zeros((1+2*self.pol,2,len(WUinv_a_lm[0])),dtype='complex')
-                            tmp_Q[u1] += 1./3./self.sym_factor[index]*self.ell_bins[bin1]*self.beam_lm*HH_maps[u3][u2][bin3][bin2]
-                            tmp_Q[u2] += 1./3./self.sym_factor[index]*self.ell_bins[bin2]*self.beam_lm*HH_maps[u3][u1][bin3][bin1]
-                            tmp_Q[u3] += 1./3./self.sym_factor[index]*self.ell_bins[bin3]*self.beam_lm*HH_maps[u2][u1][bin2][bin1]
+                            tmp_Q[u1] += 1./3./self.sym_factor[index]*self.ell_bins[bin1]*self.beam_lm[u1]*HH_maps[u3][u2][bin3][bin2]
+                            tmp_Q[u2] += 1./3./self.sym_factor[index]*self.ell_bins[bin2]*self.beam_lm[u2]*HH_maps[u3][u1][bin3][bin1]
+                            tmp_Q[u3] += 1./3./self.sym_factor[index]*self.ell_bins[bin3]*self.beam_lm[u3]*HH_maps[u2][u1][bin2][bin1]
 
                             # Define chi = +-1 pieces
                             tmp_Q_p = tmp_Q[:,0]+p_u*tmp_Q[:,1] # chi = 1
@@ -733,7 +733,7 @@ class BSpec():
                                                         tj = self.base.tj_sym(l1,l2,l3)
 
                                                         # note absorbing factor of chi*p_u here 
-                                                        value += fac*tj**2*self.beam[l1]**2*self.beam[l2]**2*self.beam[l3]**2*(2.*l1+1.)*(2.*l2+1.)*(2.*l3+1.)/(4.*np.pi)*inv_cov3
+                                                        value += fac*tj**2*self.beam[u1][l1]*self.beam[u1_p][l1]*self.beam[u2][l2]*self.beam[u2_p][l2]*self.beam[u3][l3]*self.beam[u3_p][l3]*(2.*l1+1.)*(2.*l2+1.)*(2.*l3+1.)/(4.*np.pi)*inv_cov3
                                             
                                             # Reconstruct output for even / odd ell and note symmetric matrix!
                                             for chi_index,chi in enumerate(self.chi_arr):
