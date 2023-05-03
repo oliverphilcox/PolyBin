@@ -40,8 +40,6 @@ class TSpec():
         self.min_l = np.min(l_bins)
         self.Nl = len(l_bins)-1
 
-        print("Remove any unused functions?")
-
         if len(l_bins_squeeze)>0:
             self.l_bins_squeeze = l_bins_squeeze
             self.Nl_squeeze = len(l_bins_squeeze)-1
@@ -267,7 +265,7 @@ class TSpec():
                             summand_t0 = 0.
                             for ii in range(self.N_it):
                                 summand_t0 += self.A_bb_lms[ii][u2][u1][bin2][bin1][1].conj()*self.A_aa_lms[ii][u4][u3][bin4][bin3][0]+self.A_bb_lms[ii][u2][u1][bin2][bin1][0]*self.A_aa_lms[ii][u4][u3][bin4][bin3][1].conj()
-                                summand_t0 += 4*self.A_ab_lms[ii][u2][u1][bin2][bin1][1].conj()*self.A_ab_lms[ii][u4][u3][bin4][bin3][0]+self.A_ab_lms[ii][u2][u1][bin2][bin1][0]*self.A_ab_lms[ii][u4][u3][bin4][bin3][1].conj()
+                                summand_t0 += 4*(self.A_ab_lms[ii][u2][u1][bin2][bin1][1].conj()*self.A_ab_lms[ii][u4][u3][bin4][bin3][0]+self.A_ab_lms[ii][u2][u1][bin2][bin1][0]*self.A_ab_lms[ii][u4][u3][bin4][bin3][1].conj())
                                 summand_t0 += self.A_aa_lms[ii][u2][u1][bin2][bin1][1].conj()*self.A_bb_lms[ii][u4][u3][bin4][bin3][0]+self.A_aa_lms[ii][u2][u1][bin2][bin1][0]*self.A_bb_lms[ii][u4][u3][bin4][bin3][1].conj()
                             summand_t0 = self.base.m_weight*summand_t0/self.N_it/4.
 
@@ -495,7 +493,7 @@ class TSpec():
 
         We can also optionally switch off the disconnected terms, which affects only parity-conserving trispectra.
         """
-
+        
         # Compute symmetry factors, if not already present
         if not hasattr(self, 'sym_factor'):
             self._compute_symmetry_factor()
@@ -567,11 +565,11 @@ class TSpec():
                                 for ii in range(self.N_it):
                                     # first set of fields (note we have already symmetrized over A_xy vs A_yx)
                                     summand_t2 += A_dd_lms[u2][u1][bin2][bin1][1].conj()*self.A_aa_lms[ii][u4][u3][bin4][bin3][0]+A_dd_lms[u2][u1][bin2][bin1][0]*self.A_aa_lms[ii][u4][u3][bin4][bin3][1].conj()
-                                    summand_t2 += 4*A_ad_lms[ii][u2][u1][bin2][bin1][1].conj()*A_ad_lms[ii][u4][u3][bin4][bin3][0]+A_ad_lms[ii][u2][u1][bin2][bin1][0]*A_ad_lms[ii][u4][u3][bin4][bin3][1].conj()
+                                    summand_t2 += 4*(A_ad_lms[ii][u2][u1][bin2][bin1][1].conj()*A_ad_lms[ii][u4][u3][bin4][bin3][0]+A_ad_lms[ii][u2][u1][bin2][bin1][0]*A_ad_lms[ii][u4][u3][bin4][bin3][1].conj())
                                     summand_t2 += self.A_aa_lms[ii][u2][u1][bin2][bin1][1].conj()*A_dd_lms[u4][u3][bin4][bin3][0]+self.A_aa_lms[ii][u2][u1][bin2][bin1][0]*A_dd_lms[u4][u3][bin4][bin3][1].conj()
                                     # second set of fields
                                     summand_t2 += A_dd_lms[u2][u1][bin2][bin1][1].conj()*self.A_bb_lms[ii][u4][u3][bin4][bin3][0]+A_dd_lms[u2][u1][bin2][bin1][0]*self.A_bb_lms[ii][u4][u3][bin4][bin3][1].conj()
-                                    summand_t2 += 4*A_bd_lms[ii][u2][u1][bin2][bin1][1].conj()*A_bd_lms[ii][u4][u3][bin4][bin3][0]+A_bd_lms[ii][u2][u1][bin2][bin1][0]*A_bd_lms[ii][u4][u3][bin4][bin3][1].conj()
+                                    summand_t2 += 4*(A_bd_lms[ii][u2][u1][bin2][bin1][1].conj()*A_bd_lms[ii][u4][u3][bin4][bin3][0]+A_bd_lms[ii][u2][u1][bin2][bin1][0]*A_bd_lms[ii][u4][u3][bin4][bin3][1].conj())
                                     summand_t2 += self.A_bb_lms[ii][u2][u1][bin2][bin1][1].conj()*A_dd_lms[u4][u3][bin4][bin3][0]+self.A_bb_lms[ii][u2][u1][bin2][bin1][0]*A_dd_lms[u4][u3][bin4][bin3][1].conj()
                                 summand_t2 = self.base.m_weight*summand_t2/self.N_it/4.
 
@@ -814,7 +812,8 @@ class TSpec():
 
         We can also optionally switch off the disconnected terms.
         """
-        
+        if verb: print("\n")
+
         if len(fish)!=0:
             self.fish = fish
             self.inv_fish = np.linalg.inv(fish)
@@ -852,14 +851,12 @@ class TSpec():
         # Compute symmetry factor, if not already present
         if not hasattr(self, 'sym_factor'):
             self._compute_symmetry_factor()
-
-        print("NB: cross-Alms have been symmetrized - does this allow for speed-up?")
-
+        
         # Transform to harmonic space and normalize data by 1/C_th
         Cinv_data_lm = np.einsum('ijk,jk->ik',self.base.inv_Cl_lm_mat,self.base.to_lm(data),order='C')
 
         # Compute (+-1)H maps
-        if verb: print("Computing H maps")
+        if verb: print("\nComputing H maps")
         H_pm1_maps = self._compute_H_maps(Cinv_data_lm)
 
         # Define array of A maps
@@ -881,7 +878,7 @@ class TSpec():
         # Define 4-, 2- and 0-field arrays
         t4_num_ideal = np.zeros(self.N_t)
         if not include_disconnected_term:
-            print("No subtraction of (parity-conserving) disconnected terms performed!")
+            print("## No subtraction of (parity-conserving) disconnected terms performed!")
         else:
             t2_num_ideal = np.zeros(self.N_t)
             t0_num_ideal = np.zeros(self.N_t)
@@ -967,6 +964,9 @@ class TSpec():
             t_num_ideal = (t4_num_ideal/np.mean(self.mask**4.)+t2_num_ideal/np.mean(self.mask**2.)+t0_num_ideal)/self.sym_factor
         else:
             t_num_ideal = t4_num_ideal/np.mean(self.mask**4.)/self.sym_factor
+        
+        # Save t0 array for posterity
+        if include_disconnected_term: self.t0_num_ideal = t0_num_ideal
             
         return t_num_ideal
 
@@ -1206,6 +1206,7 @@ class TSpec():
         
         The N_cpus parameter specifies how many CPUs to use in computation of the ideal Fisher matrix.
         """
+        if verb: print("\n")
 
         if len(fish_ideal)!=0:
             self.fish_ideal = fish_ideal
