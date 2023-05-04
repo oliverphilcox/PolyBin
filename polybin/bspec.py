@@ -169,36 +169,6 @@ class BSpec():
         H_minus = [np.asarray([(-1)**spin*H.conj() for H in this_H_plus]) for this_H_plus in H_plus]
         return H_plus, H_minus
     
-    def _compute_HH(self, H_pm2, H_pm1):
-        """
-        Compute spin-+-1 transforms of (+-1)H(+-2)H fields for all bin and field pairs.
-        
-        This function is used in computation of the bispectrum Fisher matrix.
-        """
-        HH_arr = []
-        for u2 in range(1+2*self.pol):
-            HH_arr1 = []
-            for u3 in range(u2+1):
-                HH_arr2 = []
-                for b2 in range(self.Nl_squeeze):
-                    HH_arr3 = []
-                    for b3 in range(self.Nl_squeeze):
-                        if u2==u3 and b3>b2: continue
-
-                        # Compute forward harmonic transforms (for both odd and even pieces simultaneously)
-                        out = self.base.to_lm_spin(H_pm1[0][b2][u2]*H_pm1[0][b3][u3],H_pm1[1][b2][u2]*H_pm1[1][b3][u3],2)[::-1].conj()
-                        if b2==b3 and u2==u3:
-                            out -= 2*np.asarray([[1],[-1]])*self.base.to_lm_spin(H_pm1[1][b2][u2]*H_pm2[0][b3][u3],-H_pm1[0][b2][u2]*H_pm2[1][b3][u3],1).conj()
-                        else:
-                            out -= np.asarray([[1],[-1]])*self.base.to_lm_spin(H_pm1[1][b2][u2]*H_pm2[0][b3][u3],-H_pm1[0][b2][u2]*H_pm2[1][b3][u3],1).conj()
-                            out -= np.asarray([[1],[-1]])*self.base.to_lm_spin(H_pm2[0][b2][u2]*H_pm1[1][b3][u3],-H_pm2[1][b2][u2]*H_pm1[0][b3][u3],1).conj()
-
-                        HH_arr3.append(out)
-                    HH_arr2.append(HH_arr3)
-                HH_arr1.append(HH_arr2)
-            HH_arr.append(HH_arr1)
-        return HH_arr
-    
     def get_ells(self, field='TTT'):
         """
         Return an array with the central l1, l2, l3 values for each bispectrum bin, given a set of fields.
@@ -322,7 +292,7 @@ class BSpec():
                 
         else:
             self.preload = False
-            if verb: print("No preloading; simulations will be loaded and accessed at runtime!")
+            if verb: print("No preloading; simulations will be loaded and accessed at runtime.")
             
             # Simply save iterator and continue (simulations will be processed in serial later) 
             if self.ones_mask:
@@ -340,7 +310,7 @@ class BSpec():
         if not hasattr(self, 'sym_factor'):
             self._compute_symmetry_factor()
             
-        if not hasattr(self, 'preload') and include_linear_term:
+        if (not hasattr(self, 'preload')) and include_linear_term:
             raise Exception("Need to generate or specify bias simulations!")
         
         # Apply W * S^-1 to data and transform to harmonic space
@@ -443,7 +413,7 @@ class BSpec():
         # Assemble numerator
         b_num = b3_num + b1_num
         return b_num
-    
+        
     def compute_fisher_contribution(self, seed, verb=False):
         """
         This computes the contribution to the Fisher matrix from a single pair of GRF simulations, created internally.
@@ -464,12 +434,12 @@ class BSpec():
                 a_maps.append(self.base.generate_data(seed=seed+int((1+ii)*1e8), output_type='harmonic'))
             else:
                 a_maps.append(self.base.generate_data(seed=seed+int((1+ii)*1e8)))
-        
+
         # Define Q map code
         def compute_Q3(a_map, weighting):
             """
-            Assemble and return the Q3 maps in real- or harmonic-space, given a random field a_lm fields. 
-            
+            Assemble and return the Q3 maps in real- or harmonic-space, given a random field a_lm. 
+
             This computes maps with chi = +1 and -1 if parity='both'.
 
             The outputs are either Q(b) or WS^-1WQ(b).
@@ -484,23 +454,18 @@ class BSpec():
                 WUinv_a_lm = weighting_function(a_map, input_type='harmonic', output_type='harmonic')
             else:
                 WUinv_a_lm = self.base.to_lm(self.mask*weighting_function(a_map))
-                
+
             # Compute (+-1)H maps and (+-2)H maps
             if verb: print("Creating H maps")
             H_pm2_Uinv_maps = self._compute_H_pm(WUinv_a_lm, 2)
             H_pm1_Uinv_maps = self._compute_H_pm(WUinv_a_lm, 1)
-            
-            # Compute pairs of H fields
-            # NB: ordering is such that largest index is first if degenerate
-            if verb: print("Computing (H H')_{lm}")
-            HH_maps = self._compute_HH(H_pm2_Uinv_maps, H_pm1_Uinv_maps)
 
             # Now assemble and return Q3 maps
             # Define arrays
-            Q_maps = np.zeros((self.N_b,len(a_maps[0].ravel())),dtype='complex')
-
-            # Iterate over fields and bins
-            index = -1
+            tmp_Q = np.zeros((self.N_b,1+2*self.pol,len(WUinv_a_lm[0])),dtype='complex')
+            
+            # Compute indices for each triplet of fields
+            indices = []
             for u in self.fields:
                 u1, u2, u3 = [self.base.indices[u[i]] for i in range(3)]
                 p_u = np.product([self.base.parities[u[i]] for i in range(3)])
@@ -508,57 +473,106 @@ class BSpec():
                 for bin1 in range(self.Nl):
                     for bin2 in range(self.Nl_squeeze):
                         if u1==u2 and bin2<bin1: continue
+                        
                         for bin3 in range(self.Nl_squeeze):
                             if u2==u3 and bin3<bin2: continue
 
                             # skip bins outside the triangle conditions
                             if not self._check_bin(bin1,bin2,bin3): continue
-                            index += 1
+                            indices.append([u1,u2,u3,bin1,bin2,bin3])
+            indices = np.asarray(indices)
+            
+                            
+            # Iterate over fields and bins
+            us = np.unique(indices[:,:3])
+            for u1 in us:
+                for u2 in us:
+                    for bin1 in range(self.Nl_squeeze):
+                        for bin2 in range(self.Nl_squeeze):
+                            
+                            # Find which elements of the Q3 matrix this pair is used for
+                            these_ind1 = np.where((indices[:,0]==u1)&(indices[:,1]==u2)&(indices[:,3]==bin1)&(indices[:,4]==bin2))[0]
+                            these_ind2 = np.where((indices[:,1]==u1)&(indices[:,2]==u2)&(indices[:,4]==bin1)&(indices[:,5]==bin2))[0]
+                            these_ind3 = np.where((indices[:,2]==u2)&(indices[:,0]==u1)&(indices[:,5]==bin2)&(indices[:,3]==bin1))[0] # note u2 > u1 ordering!
+                            if len(these_ind1)+len(these_ind2)+len(these_ind3)==0: continue
+                            
+                            # Define H maps from precomputed fields
+                            H_p1_1 = H_pm1_Uinv_maps[0][bin1][u1]
+                            H_m1_1 = H_pm1_Uinv_maps[1][bin1][u1]
 
-                            # Create harmonic space Q^X_lm maps
-                            tmp_Q = np.zeros((1+2*self.pol,2,len(WUinv_a_lm[0])),dtype='complex')
-                            tmp_Q[u1] += 1./3./self.sym_factor[index]*self.ell_bins[bin1]*self.beam_lm[u1]*HH_maps[u3][u2][bin3][bin2]
-                            tmp_Q[u2] += 1./3./self.sym_factor[index]*self.ell_bins[bin2]*self.beam_lm[u2]*HH_maps[u3][u1][bin3][bin1]
-                            tmp_Q[u3] += 1./3./self.sym_factor[index]*self.ell_bins[bin3]*self.beam_lm[u3]*HH_maps[u2][u1][bin2][bin1]
+                            H_p1_2 = H_pm1_Uinv_maps[0][bin2][u2]
+                            H_m1_2 = H_pm1_Uinv_maps[1][bin2][u2]
 
-                            # Define chi = +-1 pieces
-                            tmp_Q_p = tmp_Q[:,0]+p_u*tmp_Q[:,1] # chi = 1
-                            tmp_Q_m = tmp_Q[:,0]-p_u*tmp_Q[:,1] # chi = -1
+                            H_p2_1 = H_pm2_Uinv_maps[0][bin1][u1]
+                            H_m2_1 = H_pm2_Uinv_maps[1][bin1][u1]
 
-                            # Add imaginary parts if necessary
-                            if p_u==1:
-                                tmp_Q_m *= 1.0j
+                            H_p2_2 = H_pm2_Uinv_maps[0][bin2][u2]
+                            H_m2_2 = H_pm2_Uinv_maps[1][bin2][u2]
+
+                            # Compute forward harmonic transforms (for both odd and even pieces simultaneously)
+                            HH12 = self.base.to_lm_spin(H_p1_1*H_p1_2,H_m1_1*H_m1_2,2)[::-1].conj()
+                            if bin1==bin2 and u1==u2:
+                                HH12 -= 2*np.asarray([[1],[-1]])*self.base.to_lm_spin(H_m1_1*H_p2_2,-H_p1_1*H_m2_2,1).conj()
                             else:
-                                tmp_Q_p *= 1.0j
+                                HH12 -= np.asarray([[1],[-1]])*self.base.to_lm_spin(H_m1_1*H_p2_2,-H_p1_1*H_m2_2,1).conj()
+                                HH12 -= np.asarray([[1],[-1]])*self.base.to_lm_spin(H_m1_2*H_p2_1,-H_p1_2*H_m2_1,1).conj()
+                            
+                            def add_Q3_element(u3_index, bin3_index, these_ind):
+                                # Iterate over these elements and add to the output arrays
+                                for ii in these_ind:
+                                    u3 = indices[ii,u3_index]
+                                    bin3 = indices[ii,bin3_index]
+                                    p_u = 1
+                                    if u1==2: p_u *= -1
+                                    if u2==2: p_u *= -1
+                                    if u3==2: p_u *= -1
 
-                            # Optionally apply weighting and add to output arrays
-                            if weighting=='Ainv':
-                                if self.ones_mask:
-                                    if self.parity=='even' or 'both': Q_maps[index] = self.applySinv(tmp_Q_p,input_type='harmonic',output_type='harmonic').ravel()
-                                    if self.parity=='both': Q_maps[index+self.N_b//2] = self.applySinv(tmp_Q_m,input_type='harmonic',output_type='harmonic').ravel()
-                                    if self.parity=='odd': Q_maps[index] = self.applySinv(tmp_Q_m,input_type='harmonic',output_type='harmonic').ravel()
-                                else:
-                                    if self.parity=='even' or 'both': Q_maps[index] = (self.mask*self.applySinv(self.mask*self.base.to_map(tmp_Q_p))).ravel()
-                                    if self.parity=='both': Q_maps[index+self.N_b//2] = (self.mask*self.applySinv(self.mask*self.base.to_map(tmp_Q_m))).ravel()
-                                    if self.parity=='odd': Q_maps[index] = (self.mask*self.applySinv(self.mask*self.base.to_map(tmp_Q_m))).ravel()
-                            elif weighting=='Sinv':
-                                if self.ones_mask:
-                                    if self.parity=='even' or 'both': Q_maps[index] = (self.base.m_weight*tmp_Q_p).ravel()
-                                    if self.parity=='both': Q_maps[index+self.N_b//2] = (self.base.m_weight*tmp_Q_m).ravel()
-                                    if self.parity=='odd': Q_maps[index] = (self.base.m_weight*tmp_Q_m).ravel()
-                                else:
-                                    if self.parity=='even' or 'both': Q_maps[index] = self.base.A_pix*self.base.to_map(tmp_Q_p).ravel()
-                                    if self.parity=='both': Q_maps[index+self.N_b//2] = self.base.A_pix*self.base.to_map(tmp_Q_m).ravel()
-                                    if self.parity=='odd': Q_maps[index] = self.base.A_pix*self.base.to_map(tmp_Q_m).ravel()                        
-            return Q_maps                    
+                                    this_Q = np.zeros((1+2*self.pol,2,len(WUinv_a_lm[0])),dtype='complex')
+                                    this_Q[u3] = 1./3./self.sym_factor[ii]*self.ell_bins[bin3]*self.beam_lm[u3]*HH12
 
-        if verb: print("\n# Computing Q3 map for S^-1 weighting")
+                                    if p_u==1:
+                                        tmp_Q_p = this_Q[:,0]+p_u*this_Q[:,1] # chi = 1
+                                        tmp_Q_m = 1.0j*(this_Q[:,0]-p_u*this_Q[:,1]) # chi = -1
+                                    else:
+                                        tmp_Q_p = 1.0j*(this_Q[:,0]+p_u*this_Q[:,1]) # chi = 1
+                                        tmp_Q_m = this_Q[:,0]-p_u*this_Q[:,1] # chi = -1
+
+                                    if self.parity=='even' or 'both':
+                                        tmp_Q[ii] += tmp_Q_p
+                                    if self.parity=='both':
+                                        tmp_Q[ii+self.N_b//2] += tmp_Q_m
+                                    if self.parity=='odd':
+                                        tmp_Q[ii] += tmp_Q_m
+                                        
+                            add_Q3_element(2, 5, these_ind1)
+                            add_Q3_element(0, 3, these_ind2)
+                            add_Q3_element(1, 4, these_ind3)
+
+            # Compute output Q3 maps
+            Q_maps = np.zeros((self.N_b,len(a_maps[0].ravel())),dtype='complex')
+            if weighting=='Ainv' and verb: print("Applying S^-1 weighting to output")
+            for index in range(self.N_b):
+                if weighting=='Ainv':
+                    if self.ones_mask:
+                        Q_maps[index] = self.applySinv(tmp_Q[index],input_type='harmonic',output_type='harmonic').ravel()
+                    else:
+                        Q_maps[index] = (self.mask*self.applySinv(self.mask*self.base.to_map(tmp_Q[index]))).ravel()
+                elif weighting=='Sinv':
+                    if self.ones_mask:
+                        Q_maps[index] = (self.base.m_weight*tmp_Q[index]).ravel()
+                    else:
+                        Q_maps[index] = self.base.A_pix*self.base.to_map(tmp_Q[index]).ravel()
+                        
+            return Q_maps            
+
+        # Compute Q maps
+        if verb: print("\n# Computing Q3 map for S^-1 weighting (map 1)")
         Q3_Sinv12 = [compute_Q3(a_map, 'Sinv') for a_map in a_maps]
         if verb: print("\n# Computing Q3 map for A^-1 weighting")
         Q3_Ainv12 = [compute_Q3(a_map, 'Ainv') for a_map in a_maps]
-        
+
         # Assemble Fisher matrix
-        if verb: print("# Assembling Fisher matrix\n")
+        if verb: print("\n# Assembling Fisher matrix\n")
 
         # Compute Fisher matrix as an outer product
         fish += (Q3_Sinv12[0].conj())@(Q3_Ainv12[0].T)
@@ -569,8 +583,8 @@ class BSpec():
         fish = fish.conj()/24.
 
         return fish.real
-    
-    def compute_fisher(self, N_it, N_cpus=1):
+        
+    def compute_fisher(self, N_it, N_cpus=1, verb=False):
         """
         Compute the Fisher matrix using N_it pairs of realizations. If N_cpus > 1, this parallelizes the operations (though HEALPix is already parallelized so the speed-up is not particularly significant).
         
@@ -587,12 +601,12 @@ class BSpec():
 
         global _iterable
         def _iterable(seed):
-            return self.compute_fisher_contribution(seed)
+            return self.compute_fisher_contribution(seed, verb=verb*(seed==0))
         
         if N_cpus==1:
             for seed in range(N_it):
                 if seed%5==0: print("Computing Fisher contribution %d of %d"%(seed+1,N_it))
-                fish += self.compute_fisher_contribution(seed)/N_it
+                fish += self.compute_fisher_contribution(seed, verb=verb*(seed==0))/N_it
         else:
             p = mp.Pool(N_cpus)
             print("Computing Fisher contribution from %d pairs of Monte Carlo simulations on %d threads"%(N_it, N_cpus))
@@ -702,7 +716,6 @@ class BSpec():
         # Compute symmetry factor, if not already present
         if not hasattr(self, 'sym_factor'):
             self._compute_symmetry_factor()
-
     
         # Compute full matrix
         fish = np.zeros((self.N_b,self.N_b))
