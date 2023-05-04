@@ -49,7 +49,6 @@ class PolyBin():
 
         # Account for pixel window if necessary
         if include_pixel_window:
-            print("Pixel windows can be different for polarization??")
             if not self.pol:
                 pixwin = healpy.pixwin(self.Nside, pol=False)
                 self.beam[0] *= pixwin

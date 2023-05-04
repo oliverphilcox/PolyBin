@@ -226,74 +226,110 @@ class BSpec():
         
         return l1s,l2s,l3s
     
-    def load_sims(self, sims, verb=False, input_type='map'):
+    def _process_sim(self, sim, input_type='map'):
         """
-        Load in Monte Carlo simulations used in the linear term of the bispectrum estimator. 
+        Process a single input simulation. This is used for the linear term of the bispectrum estimator.
+        
+        We return (+1)H and (-2)H maps for this simulation.
+        """
+        # Transform to Fourier space and normalize appropriately
+        if self.ones_mask:
+            Wh_alpha_lm = self.applySinv(sim, input_type=input_type, output_type='harmonic')
+        else:
+            Wh_alpha_lm = self.base.to_lm(self.mask*self.applySinv(sim,input_type=input_type))
+
+        # Compute (+1)H and (-2)H maps
+        p1_H_maps = [self.base.compute_spin_transform_map(self.ell_bins[bin1]*self.beam_lm*Wh_alpha_lm.conj(),1) for bin1 in range(self.Nl_squeeze)]
+        m2_H_maps = [self.base.compute_spin_transform_map(self.ell_bins[bin1]*self.beam_lm*Wh_alpha_lm.conj(),-2) for bin1 in range(self.Nl_squeeze)]
+        
+        return p1_H_maps, m2_H_maps
+
+    def load_sims(self, load_sim, N_sims, verb=False, input_type='map', preload=True):
+        """
+        Load in and preprocess N_sim Monte Carlo simulations used in the linear term of the bispectrum estimator. 
         These can alternatively be generated with a fiducial spectrum using the generate_sims script.
 
-        We can read in input simulations either in map- or harmonic-space.
+        The input is a function which loads the simulations in map- or harmonic-space given an index (0 to N_sims-1).
+
+        If preload=False, the simulation products will not be stored in memory, but instead accessed when necessary. This greatly reduces memory usage, but is less CPU efficient if many datasets are analyzed together.
         """
         
-        self.N_it = len(sims)
+        self.N_it = N_sims
         print("Using %d Monte Carlo simulations"%self.N_it)
         
-        # Iterate over simulations
-        self.p1_H_maps, self.m2_H_maps = [], []
+        if preload:
+            self.preload = True
+
+            # Define lists of maps
+            self.p1_H_maps, self.m2_H_maps = [], []
         
-        for ii in range(self.N_it):
-            if ii%5==0 and verb: print("Processing bias simulation %d of %d"%(ii+1,self.N_it))
+            # Iterate over simulations and preprocess appropriately
+            for ii in range(self.N_it):
+                if verb: print("Loading bias simulation %d of %d"%(ii+1,self.N_it))    
+                this_sim = load_sim(ii)
+
+                # Process simulation
+                p1_H_maps, m2_H_maps = self._process_sim(this_sim, input_type=input_type)
+
+                self.p1_H_maps.append(p1_H_maps)
+                self.m2_H_maps.append(m2_H_maps)
+
+        else:
+            self.preload = False
+            if verb: print("No preloading; simulations will be loaded and accessed at runtime.")
             
-            # Transform to Fourier space and normalize appropriately
-            if self.ones_mask:
-                Wh_alpha_lm = self.applySinv(sims[ii], input_type=input_type, output_type='harmonic')
-            else:
-                Wh_alpha_lm = self.base.to_lm(self.mask*self.applySinv(sims[ii],input_type=input_type))
-            
-            # Compute (+1)H and (-2)H maps
-            p1_H_maps = [self.base.compute_spin_transform_map(self.ell_bins[bin1]*self.beam_lm*Wh_alpha_lm.conj(),1) for bin1 in range(self.Nl_squeeze)]
-            m2_H_maps = [self.base.compute_spin_transform_map(self.ell_bins[bin1]*self.beam_lm*Wh_alpha_lm.conj(),-2) for bin1 in range(self.Nl_squeeze)]
-            
-            self.p1_H_maps.append(p1_H_maps)
-            self.m2_H_maps.append(m2_H_maps)
-            
-    def generate_sims(self, N_it, Cl_input=[], b_input=None, add_B=False, remove_mean=True, verb=False):
+            # Simply save iterator and continue (simulations will be processed in serial later) 
+            self.load_sim_data = lambda ii: self._process_sim(load_sim(ii), input_type=input_type)
+           
+    def generate_sims(self, N_sim, Cl_input=[], b_input=None, add_B=False, remove_mean=True, verb=False, preload=True):
         """
-        Generate Monte Carlo simulations used in the linear term of the bispectrum generator. 
+        Generate N_sim Monte Carlo simulations used in the linear term of the bispectrum generator. 
         These are pure GRFs, optionally with a bispectrum added. By default, they are generated with the input survey mask.
-        We create N_it such simulations and store the relevant transformations into memory.
+        
+        If preload=True, we create N_it such simulations and store the relevant transformations into memory.
+        If preload=False, we store only the function used to generate the sims, which will be processed later. This is cheaper on memory, but less CPU efficient if many datasets are analyzed together.
         
         We can alternatively load custom simulations using the load_sims script.
         """
         
-        self.N_it = N_it
+        self.N_it = N_sim
         print("Using %d Monte Carlo simulations"%self.N_it)
         
         # Define input power spectrum (with noise)
         if len(Cl_input)==0:
             Cl_input = self.base.Cl
 
-        self.p1_H_maps, self.m2_H_maps = [],[]
-        
-        # Iterate over simulations
-        self.Q_b_alpha_maps = []
-        for ii in range(N_it):
-            if ii%5==0 and verb: print("Generating bias simulation %d of %d"%(ii+1,N_it))
+        if preload:
+            self.preload = True
+
+            # Define lists of maps
+            self.p1_H_maps, self.m2_H_maps = [],[]
+
+            # Iterate over simulations and preprocess appropriately
+            for ii in range(self.N_it):
+                if verb: print("Generating bias simulation %d of %d"%(ii+1,self.N_it))
+                
+                # Generate simulation and Fourier transform
+                if self.ones_mask:
+                    alpha_lm = self.base.generate_data(int(1e5)+ii, Cl_input=Cl_input, b_input=b_input, add_B=add_B, remove_mean=remove_mean, output_type='harmonic')
+                    p1_H_maps, m2_H_maps = self._process_sim(alpha_lm, input_type='harmonic')
+                else:
+                    alpha = self.mask*self.base.generate_data(int(1e5)+ii, Cl_input=Cl_input, b_input=b_input, add_B=add_B, remove_mean=remove_mean)
+                    p1_H_maps, m2_H_maps = self._process_sim(alpha)
+                    
+                self.p1_H_maps.append(p1_H_maps)
+                self.m2_H_maps.append(m2_H_maps)
+                
+        else:
+            self.preload = False
+            if verb: print("No preloading; simulations will be loaded and accessed at runtime!")
             
-            # Generate simulation and Fourier transform
+            # Simply save iterator and continue (simulations will be processed in serial later) 
             if self.ones_mask:
-                raw_alpha_lm = self.base.generate_data(int(1e5)+ii, Cl_input=Cl_input, b_input=b_input, add_B=add_B, remove_mean=remove_mean, output_type='harmonic')
-                Wh_alpha_lm = self.applySinv(raw_alpha_lm, input_type='harmonic', output_type='harmonic')
+                self.load_sim_data = lambda ii: self._process_sim(self.base.generate_data(int(1e5)+ii, Cl_input=Cl_input, b_input=b_input, add_B=add_B, remove_mean=remove_mean, output_type='harmonic'), input_type='harmonic')
             else:
-                raw_alpha = self.base.generate_data(int(1e5)+ii, Cl_input=Cl_input, b_input=b_input, add_B=add_B, remove_mean=remove_mean)
-                Wh_alpha_lm = self.base.to_lm(self.mask*self.applySinv(raw_alpha*self.mask))
-            
-            # Compute (+1)H and (-2)H maps
-            p1_H_maps = [self.base.compute_spin_transform_map(self.ell_bins[bin1]*self.beam_lm*Wh_alpha_lm.conj(),1) for bin1 in range(self.Nl_squeeze)]
-            m2_H_maps = [self.base.compute_spin_transform_map(self.ell_bins[bin1]*self.beam_lm*Wh_alpha_lm.conj(),-2) for bin1 in range(self.Nl_squeeze)]
-            
-            self.p1_H_maps.append(p1_H_maps)
-            self.m2_H_maps.append(m2_H_maps)
-            
+                self.load_sim_data = lambda ii: self._process_sim(self.mask*self.base.generate_data(int(1e5)+ii, Cl_input=Cl_input, b_input=b_input, add_B=add_B, remove_mean=remove_mean))
+
     ### OPTIMAL ESTIMATOR
     def Bl_numerator(self, data, include_linear_term=True, verb=False):
         """
@@ -304,7 +340,7 @@ class BSpec():
         if not hasattr(self, 'sym_factor'):
             self._compute_symmetry_factor()
             
-        if not hasattr(self, 'Q_b_alpha_maps') and include_linear_term:
+        if not hasattr(self, 'preload') and include_linear_term:
             raise Exception("Need to generate or specify bias simulations!")
         
         # Apply W * S^-1 to data and transform to harmonic space
@@ -360,6 +396,12 @@ class BSpec():
             for ii in range(self.N_it):
                 if (ii+1)%5==0 and verb: print("Computing b_1 piece from simulation %d"%(ii+1))
 
+                # Load processed bias simulations 
+                if self.preload:
+                    this_p1_H_maps, this_m2_H_maps = self.p1_H_maps[ii], self.m2_H_maps[ii]
+                else:
+                    this_p1_H_maps, this_m2_H_maps = self.load_sim_data(ii)
+
                 index = 0
                 for u in self.fields:
                     u1, u2, u3 = [self.base.indices[u[i]] for i in range(3)]
@@ -375,17 +417,17 @@ class BSpec():
                                 if not self._check_bin(bin1,bin2,bin3): continue
 
                                 # Compute combination of fields
-                                tmp_sum  = p1_H_maps[bin1][u1]*self.p1_H_maps[ii][bin2][u2]*self.m2_H_maps[ii][bin3][u3]
-                                tmp_sum += p1_H_maps[bin2][u2]*self.p1_H_maps[ii][bin3][u3]*self.m2_H_maps[ii][bin1][u1]
-                                tmp_sum += p1_H_maps[bin3][u3]*self.p1_H_maps[ii][bin1][u1]*self.m2_H_maps[ii][bin2][u2]
+                                tmp_sum  = p1_H_maps[bin1][u1]*this_p1_H_maps[bin2][u2]*this_m2_H_maps[bin3][u3]
+                                tmp_sum += p1_H_maps[bin2][u2]*this_p1_H_maps[bin3][u3]*this_m2_H_maps[bin1][u1]
+                                tmp_sum += p1_H_maps[bin3][u3]*this_p1_H_maps[bin1][u1]*this_m2_H_maps[bin2][u2]
                                 
-                                tmp_sum += self.p1_H_maps[ii][bin1][u1]*p1_H_maps[bin2][u2]*self.m2_H_maps[ii][bin3][u3]
-                                tmp_sum += self.p1_H_maps[ii][bin2][u2]*p1_H_maps[bin3][u3]*self.m2_H_maps[ii][bin1][u1]
-                                tmp_sum += self.p1_H_maps[ii][bin3][u3]*p1_H_maps[bin1][u1]*self.m2_H_maps[ii][bin2][u2]
+                                tmp_sum += this_p1_H_maps[bin1][u1]*p1_H_maps[bin2][u2]*this_m2_H_maps[bin3][u3]
+                                tmp_sum += this_p1_H_maps[bin2][u2]*p1_H_maps[bin3][u3]*this_m2_H_maps[bin1][u1]
+                                tmp_sum += this_p1_H_maps[bin3][u3]*p1_H_maps[bin1][u1]*this_m2_H_maps[bin2][u2]
                                 
-                                tmp_sum += self.p1_H_maps[ii][bin1][u1]*self.p1_H_maps[ii][bin2][u2]*m2_H_maps[bin3][u3]
-                                tmp_sum += self.p1_H_maps[ii][bin2][u2]*self.p1_H_maps[ii][bin3][u3]*m2_H_maps[bin1][u1]
-                                tmp_sum += self.p1_H_maps[ii][bin3][u3]*self.p1_H_maps[ii][bin1][u1]*m2_H_maps[bin2][u2]
+                                tmp_sum += this_p1_H_maps[bin1][u1]*this_p1_H_maps[bin2][u2]*m2_H_maps[bin3][u3]
+                                tmp_sum += this_p1_H_maps[bin2][u2]*this_p1_H_maps[bin3][u3]*m2_H_maps[bin1][u1]
+                                tmp_sum += this_p1_H_maps[bin3][u3]*this_p1_H_maps[bin1][u1]*m2_H_maps[bin2][u2]
                         
                                 # Perform map-level summation and take real/im part, summing over permutations
                                 chi_index = 0

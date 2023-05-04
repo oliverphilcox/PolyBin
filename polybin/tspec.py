@@ -227,65 +227,6 @@ class TSpec():
         
         return l1s,l2s,l3s,l4s,Ls
     
-    def _compute_t0_numerator(self, verb=False):
-        """
-        Compute the zero-field contribution to the parity-odd or parity-even trispectrum. This is a sum over Monte Carlo simulations but does not involve data. 
-
-        The output is *not* normalized by the symmetry factor.
-
-        Note that this requires processed simulations, computed either from generate_sims() or load_sims().
-        """
-
-        # First check that simulations have been loaded
-        if not hasattr(self, 'A_ab_lms'):
-            raise Exception("Need to generate or specify bias simulations!")
-
-        # Define arrays
-        self.t0_num = np.zeros(self.N_t)
-        
-        # Iterate over fields
-        index = 0
-        for u in self.fields:
-            u1, u2, u3, u4 = [self.base.indices[u[i]] for i in range(4)]
-            p_u = np.product([self.base.parities[u[i]] for i in range(4)])
-            if verb: print("Analyzing trispectrum numerator for field %s"%u)
-
-            # Iterate over bins satisfying relevant conditions
-            for bin1 in range(self.Nl):
-                for bin2 in range(self.Nl_squeeze):
-                    if u1==u2 and bin2<bin1: continue
-                    for bin3 in range(self.Nl):
-                        if u1==u3 and u2==u4 and bin3<bin1: continue
-                        for bin4 in range(self.Nl_squeeze):
-                            if u3==u4 and bin4<bin3: continue
-                            if u1==u3 and u2==u4 and bin1==bin3 and bin4<bin2: continue
-
-                            # Compute summands, summing over permutations and MC fields
-                            # Note we have already symmetrized over A_xy vs A_yx
-                            summand_t0 = 0.
-                            for ii in range(self.N_it):
-                                summand_t0 += self.A_bb_lms[ii][u2][u1][bin2][bin1][1].conj()*self.A_aa_lms[ii][u4][u3][bin4][bin3][0]+self.A_bb_lms[ii][u2][u1][bin2][bin1][0]*self.A_aa_lms[ii][u4][u3][bin4][bin3][1].conj()
-                                summand_t0 += 4*(self.A_ab_lms[ii][u2][u1][bin2][bin1][1].conj()*self.A_ab_lms[ii][u4][u3][bin4][bin3][0]+self.A_ab_lms[ii][u2][u1][bin2][bin1][0]*self.A_ab_lms[ii][u4][u3][bin4][bin3][1].conj())
-                                summand_t0 += self.A_aa_lms[ii][u2][u1][bin2][bin1][1].conj()*self.A_bb_lms[ii][u4][u3][bin4][bin3][0]+self.A_aa_lms[ii][u2][u1][bin2][bin1][0]*self.A_bb_lms[ii][u4][u3][bin4][bin3][1].conj()
-                            summand_t0 = self.base.m_weight*summand_t0/self.N_it/4.
-
-                            # Iterate over L bins
-                            for binL in range(self.NL):
-                                # skip bins outside the triangle conditions
-                                if not self._check_bin(bin1,bin2,binL): continue
-                                if not self._check_bin(bin3,bin4,binL): continue
-
-                                # Assemble numerators for both parities
-                                chi_index = 0
-                                for chi in self.chi_arr:
-                                    if p_u*chi==-1:
-                                        summand_t0_real = 1.0j*summand_t0
-                                    else:
-                                        summand_t0_real = summand_t0
-                                    self.t0_num[chi_index*self.N_t//2+index] = np.real(np.sum(summand_t0_real*self.ell_bins[binL]))
-                                    chi_index += 1
-                                index += 1
-                
     def _compute_H_maps(self, h_lm):
         """
         Compute (+-1)H(n) maps for each bin. These are used in the trispectrum numerators.
@@ -391,99 +332,140 @@ class TSpec():
                 HA_lms1.append(HA_lms2)
             HA_lms.append(HA_lms1)
         return HA_lms
-    
-    def load_sims(self, sims, verb=False, input_type='map'):
+
+    def _process_sim(self, sim_pair, input_type='map'):
         """
-        Load in Monte Carlo simulations used in the two- and zero-field terms of the trispectrum estimator. This should be a list of *pairs* of simulations, [[simA-1, simB-1], [simA-2, simB-2], ...]
+        Process a single pair of input simulations. This is used for the 2- and 0-field term of the trispectrum estimator.
+        
+        We return H and A maps for this simulation for all bins of relevance.
+        """
+        # Transform to Fourier space and normalize appropriately
+        if self.ones_mask:
+            Wh_alpha_lm = self.applySinv(sim_pair[0], input_type=input_type, output_type='harmonic')
+            Wh_beta_lm = self.applySinv(sim_pair[1], input_type=input_type, output_type='harmonic')
+        else:
+            Wh_alpha_lm = self.base.to_lm(self.mask*self.applySinv(sim_pair[0],input_type=input_type))
+            Wh_beta_lm = self.base.to_lm(self.mask*self.applySinv(sim_pair[1],input_type=input_type))
+        
+        # Compute H_alpha and H_beta maps
+        H_a_maps = self._compute_H_maps(Wh_alpha_lm)
+        H_b_maps = self._compute_H_maps(Wh_beta_lm)
 
+        # Compute A[alpha,alpha](b1,b2) maps
+        A_aa_lms = self._compute_A_lms(H_a_maps)
+        A_bb_lms = self._compute_A_lms(H_b_maps)
+
+        # Compute A[alpha,beta](b1,b2) maps (symmetrized over alpha and beta)
+        A_ab_lms = self._compute_A_lms(H_a_maps, H_b_maps)
+
+        return H_a_maps, H_b_maps, A_aa_lms, A_bb_lms, A_ab_lms
+    
+    def load_sims(self, load_sim_pair, N_pairs, verb=False, preload=True, input_type='map'):
+        """
+        Load in and preprocess N_sim pairs of Monte Carlo simulations used in the two- and zero-field terms of the trispectrum estimator.
+
+        The input is a function which loads the pairs of simulations in map- or harmonic-space given an index (0 to N_pairs-1).
+
+        If preload=False, the simulation products will not be stored in memory, but instead accessed when necessary. This greatly reduces memory usage, but is less CPU efficient if many datasets are analyzed together.
+        
         These can alternatively be generated with a fiducial spectrum using the generate_sims script.
-
-        We can read in input simulations either in map- or harmonic-space.
         """
         
-        self.N_it = len(sims)
+        self.N_it = N_pairs
         print("Using %d pairs of Monte Carlo simulations"%self.N_it)
 
-        # Define lists
-        self.A_aa_lms, self.A_bb_lms, self.A_ab_lms = [],[],[]
-        self.H_a_maps, self.H_b_maps = [],[]
-        
-        for ii in range(self.N_it):
-            if ii%5==0 and verb: print("Processing bias simulation %d of %d"%(ii+1,self.N_it))
+        if preload:
+            self.preload = True
 
-            # Transform to Fourier space and normalize appropriately
-            if self.ones_mask:
-                Wh_alpha_lm = self.applySinv(sims[ii][0], input_type=input_type, output_type='harmonic')
-                Wh_beta_lm = self.applySinv(sims[ii][1], input_type=input_type, output_type='harmonic')
-            else:
-                Wh_alpha_lm = self.base.to_lm(self.mask*self.applySinv(sims[ii][0],input_type=input_type))
-                Wh_beta_lm = self.base.to_lm(self.mask*self.applySinv(sims[ii][1],input_type=input_type))
-            
-            # Compute H_alpha maps
-            self.H_a_maps.append(self._compute_H_maps(Wh_alpha_lm))
-            self.H_b_maps.append(self._compute_H_maps(Wh_beta_lm))
-            
-            # Compute A[alpha,alpha](b1,b2) maps
-            self.A_aa_lms.append(self._compute_A_lms(self.H_a_maps[-1]))
-            self.A_bb_lms.append(self._compute_A_lms(self.H_b_maps[-1]))
+            #  Define lists of maps
+            self.A_aa_lms, self.A_bb_lms, self.A_ab_lms = [],[],[]
+            self.H_a_maps, self.H_b_maps = [],[]
 
-            # Compute A[alpha,beta](b1,b2) maps (symmetrized over alpha and beta)
-            self.A_ab_lms.append(self._compute_A_lms(self.H_a_maps[-1], self.H_b_maps[-1]))
+            # Iterate over simulations and preprocess appropriately    
+            for ii in range(self.N_it):
+                if ii%5==0 and verb: print("Processing bias simulation %d of %d"%(ii+1,self.N_it))
+
+                sim_pair = load_sim_pair(ii)
+                H_a_maps, H_b_maps, A_aa_lms, A_bb_lms, A_ab_lms = self._process_sim(sim_pair, input_type=input_type)
+                
+                # Compute H_alpha maps
+                self.H_a_maps.append(H_a_maps)
+                self.H_b_maps.append(H_b_maps)
+                
+                # Compute A[alpha,alpha](b1,b2) maps
+                self.A_aa_lms.append(A_aa_lms)
+                self.A_bb_lms.append(A_bb_lms)
+
+                # Compute A[alpha,beta](b1,b2) maps (symmetrized over alpha and beta)
+                self.A_ab_lms.append(A_ab_lms)
             
-    def generate_sims(self, N_it, Cl_input=[], verb=False):
+        else:
+            self.preload = False
+            if verb: print("No preloading; simulations will be loaded and accessed at runtime.")
+
+            # Simply save iterator and continue (simulations will be processed in serial later) 
+            self.load_sim_data = lambda ii: self._process_sim(load_sim_pair(ii), input_type=input_type)
+            
+    def generate_sims(self, N_pairs, Cl_input=[], preload=True, verb=False):
         """
         Generate Monte Carlo simulations used in the two- and zero-field terms of the trispectrum generator. 
         These are pure GRFs. By default, they are generated with the input survey mask.
-        We create N_it such simulations and store the relevant transformations into memory.
+        
+        If preload=True, we create N_pairs of simulations and store the relevant transformations into memory.
+        If preload=False, we store only the function used to generate the sims, which will be processed later. This is cheaper on memory, but less CPU efficient if many datasets are analyzed together.
         
         We can alternatively load custom simulations using the load_sims script.
-        
-        We can read in input simulations either in map- or harmonic-space.
         """
 
-        self.N_it = N_it
+        self.N_it = N_pairs
         print("Using %d pairs of Monte Carlo simulations"%self.N_it)
         
         # Define input power spectrum (with noise)
         if len(Cl_input)==0:
             Cl_input = self.base.Cl
-        
-        # Define lists
-        self.A_aa_lms, self.Abar_aa_lms = [],[]
-        self.A_bb_lms, self.Abar_bb_lms = [],[]
-        self.A_ab_lms, self.Abar_ab_lms = [],[]
-        self.H_a_maps, self.H_b_maps = [],[]
-        self.Hbar_a_maps, self.Hbar_b_maps = [],[]
 
-        # Iterate over simulations
-        for ii in range(self.N_it):
-            if ii%5==0 and verb: print("Generating bias simulation %d of %d"%(ii+1,N_it))
+        if preload:
+            self.preload = True
+
+            # Define lists of maps
+            self.H_a_maps, self.H_b_maps = [],[]
+            self.A_aa_lms, self.A_bb_lms, self.A_ab_lms = [],[],[]
             
-            # Generate simulation and Fourier transform
-            if self.ones_mask:
-                raw_alpha_lm = self.base.generate_data(int(1e5)+ii, Cl_input=Cl_input, output_type='harmonic')
-                Wh_alpha_lm = self.applySinv(raw_alpha_lm, input_type='harmonic', output_type='harmonic')
+            # Iterate over simulations
+            for ii in range(self.N_it):
+                if ii%5==0 and verb: print("Generating bias simulation pair %d of %d"%(ii+1,self.N_it))
                 
-                raw_beta_lm = self.base.generate_data(int(2e5)+ii, Cl_input=Cl_input, output_type='harmonic')
-                Wh_beta_lm = self.applySinv(raw_beta_lm, input_type='harmonic', output_type='harmonic')
-            else:
-                raw_alpha = self.base.generate_data(int(1e5)+ii, Cl_input=Cl_input)
-                Wh_alpha_lm = self.base.to_lm(self.mask*self.applySinv(raw_alpha*self.mask))
+                # Generate simulation and Fourier transform
+                if self.ones_mask:
+                    alpha_lm = self.base.generate_data(int(1e5)+ii, Cl_input=Cl_input, output_type='harmonic')
+                    beta_lm = self.base.generate_data(int(2e5)+ii, Cl_input=Cl_input, output_type='harmonic')
+                    H_a_maps, H_b_maps, A_aa_lms, A_bb_lms, A_ab_lms = self._process_sim([alpha_lm, beta_lm], input_type='harmonic')
+                else:
+                    alpha = self.mask*self.base.generate_data(int(1e5)+ii, Cl_input=Cl_input)
+                    beta = self.mask*self.base.generate_data(int(2e5)+ii, Cl_input=Cl_input)
+                    H_a_maps, H_b_maps, A_aa_lms, A_bb_lms, A_ab_lms = self._process_sim([alpha, beta])
             
-                raw_beta = self.base.generate_data(int(2e5)+ii, Cl_input=Cl_input)
-                Wh_beta_lm = self.base.to_lm(self.mask*self.applySinv(raw_beta*self.mask))
-        
-            # Compute H_alpha maps
-            self.H_a_maps.append(self._compute_H_maps(Wh_alpha_lm))
-            self.H_b_maps.append(self._compute_H_maps(Wh_beta_lm))
+                # Compute H_alpha maps
+                self.H_a_maps.append(H_a_maps)
+                self.H_b_maps.append(H_b_maps)
 
-            # Compute A[alpha,alpha](b1,b2) maps
-            self.A_aa_lms.append(self._compute_A_lms(self.H_a_maps[-1]))
-            self.A_bb_lms.append(self._compute_A_lms(self.H_b_maps[-1]))
+                # Compute A[alpha,alpha](b1,b2) maps
+                self.A_aa_lms.append(A_aa_lms)
+                self.A_bb_lms.append(A_bb_lms)
 
-            # Compute A[alpha,beta](b1,b2) maps (symmetrized over alpha and beta)
-            self.A_ab_lms.append(self._compute_A_lms(self.H_a_maps[-1], self.H_b_maps[-1]))
-        
+                # Compute A[alpha,beta](b1,b2) maps (symmetrized over alpha and beta)
+                self.A_ab_lms.append(A_ab_lms)
+
+        else:
+            self.preload = False
+            if verb: print("No preloading; simulations will be loaded and accessed at runtime.")
+            
+            # Simply save iterator and continue (simulations will be processed in serial later) 
+            if self.ones_mask:
+                self.load_sim_data = lambda ii: self._process_sim([self.base.generate_data(int(1e5)+ii, Cl_input=Cl_input, output_type='harmonic'),self.base.generate_data(int(2e5)+ii, Cl_input=Cl_input, output_type='harmonic')], input_type='harmonic')
+            else:
+                self.load_sim_data = lambda ii: self._process_sim([self.mask*self.base.generate_data(int(1e5)+ii, Cl_input=Cl_input),self.mask*self.base.generate_data(int(2e5)+ii, Cl_input=Cl_input)])
+
     ### OPTIMAL ESTIMATOR
     def Tl_numerator(self, data, include_disconnected_term=True, verb=False):
         """
@@ -499,14 +481,16 @@ class TSpec():
             self._compute_symmetry_factor()
         
         # Check if simulations have been supplied
-        if not hasattr(self, 'A_ab_lms') and include_disconnected_term:
+        if not hasattr(self, 'preload') and include_disconnected_term:
             raise Exception("Need to generate or specify bias simulations!")
 
         # Compute t0 term, if not already computed
-        if not hasattr(self, 't0_num') and include_disconnected_term:
-            if verb: print("# Computing t0 term")
-            self._compute_t0_numerator(verb=verb)
-        
+        if hasattr(self, 't0_num') and include_disconnected_term:
+            compute_t0 = False
+            if verb: print("Using precomputed t0 term")
+        else:
+            compute_t0 = True
+
         # Apply W * S^-1 to data and transform to harmonic space
         if self.ones_mask:
             Wh_data_lm = self.applySinv(data, input_type='map', output_type='harmonic')
@@ -521,29 +505,21 @@ class TSpec():
         if verb: print("Computing A_lm fields")
         A_dd_lms = self._compute_A_lms(H_maps)
         
-        # Compute cross-spectra of MC simulations and data
-        if include_disconnected_term:
-            if verb: print("Computing A_lm fields for cross-spectra")
-
-            # Compute all A[alpha, d] and A[beta, d] for all bins
-            A_ad_lms = [self._compute_A_lms(self.H_a_maps[ii],H_maps) for ii in range(self.N_it)]
-            A_bd_lms = [self._compute_A_lms(self.H_b_maps[ii],H_maps) for ii in range(self.N_it)]
-                        
         # Define 4-, 2- and 0-field arrays
         t4_num = np.zeros(self.N_t)
         if not include_disconnected_term:
             print("## No subtraction of (parity-conserving) disconnected terms performed!")
         else:
             t2_num = np.zeros(self.N_t)
-            t0_num = np.zeros(self.N_t)
-        if verb: print("# Assembling trispectrum numerator")
-
+            if compute_t0: t0_num = np.zeros(self.N_t)
+        
+        if verb: print("# Assembling trispectrum numerator (4-field term)")
         # Iterate over fields
         index = 0
         for u in self.fields:
             u1, u2, u3, u4 = [self.base.indices[u[i]] for i in range(4)]
             p_u = np.product([self.base.parities[u[i]] for i in range(4)])
-            if verb: print("Analyzing trispectrum numerator for field %s"%u)
+            if verb: print("Analyzing 4-field trispectrum numerator for field %s"%u)
 
             # Iterate over bins satisfying relevant conditions
             for bin1 in range(self.Nl):
@@ -557,22 +533,7 @@ class TSpec():
 
                             # Compute summands
                             summand_t4 = self.base.m_weight*(A_dd_lms[u2][u1][bin2][bin1][1].conj()*A_dd_lms[u4][u3][bin4][bin3][0]+A_dd_lms[u2][u1][bin2][bin1][0]*A_dd_lms[u4][u3][bin4][bin3][1].conj())/2.
-
-                            # Compute 2-field term summand
-                            if include_disconnected_term: 
-                                # Sum over 6 permutations and all MC fields
-                                summand_t2 = 0.
-                                for ii in range(self.N_it):
-                                    # first set of fields (note we have already symmetrized over A_xy vs A_yx)
-                                    summand_t2 += A_dd_lms[u2][u1][bin2][bin1][1].conj()*self.A_aa_lms[ii][u4][u3][bin4][bin3][0]+A_dd_lms[u2][u1][bin2][bin1][0]*self.A_aa_lms[ii][u4][u3][bin4][bin3][1].conj()
-                                    summand_t2 += 4*(A_ad_lms[ii][u2][u1][bin2][bin1][1].conj()*A_ad_lms[ii][u4][u3][bin4][bin3][0]+A_ad_lms[ii][u2][u1][bin2][bin1][0]*A_ad_lms[ii][u4][u3][bin4][bin3][1].conj())
-                                    summand_t2 += self.A_aa_lms[ii][u2][u1][bin2][bin1][1].conj()*A_dd_lms[u4][u3][bin4][bin3][0]+self.A_aa_lms[ii][u2][u1][bin2][bin1][0]*A_dd_lms[u4][u3][bin4][bin3][1].conj()
-                                    # second set of fields
-                                    summand_t2 += A_dd_lms[u2][u1][bin2][bin1][1].conj()*self.A_bb_lms[ii][u4][u3][bin4][bin3][0]+A_dd_lms[u2][u1][bin2][bin1][0]*self.A_bb_lms[ii][u4][u3][bin4][bin3][1].conj()
-                                    summand_t2 += 4*(A_bd_lms[ii][u2][u1][bin2][bin1][1].conj()*A_bd_lms[ii][u4][u3][bin4][bin3][0]+A_bd_lms[ii][u2][u1][bin2][bin1][0]*A_bd_lms[ii][u4][u3][bin4][bin3][1].conj())
-                                    summand_t2 += self.A_bb_lms[ii][u2][u1][bin2][bin1][1].conj()*A_dd_lms[u4][u3][bin4][bin3][0]+self.A_bb_lms[ii][u2][u1][bin2][bin1][0]*A_dd_lms[u4][u3][bin4][bin3][1].conj()
-                                summand_t2 = self.base.m_weight*summand_t2/self.N_it/4.
-
+                            
                             # Iterate over L bins
                             for binL in range(self.NL):
                                 # skip bins outside the triangle conditions
@@ -584,17 +545,101 @@ class TSpec():
                                 for chi in self.chi_arr:
                                     if p_u*chi==-1:
                                         summand_t4_real = 1.0j*summand_t4
-                                        if include_disconnected_term: summand_t2_real = 1.0j*summand_t2
                                     else:
                                         summand_t4_real = summand_t4
-                                        if include_disconnected_term: summand_t2_real = summand_t2
                                     t4_num[chi_index*self.N_t//2+index] = np.real(np.sum(summand_t4_real*self.ell_bins[binL]))
-                                    if include_disconnected_term:
-                                        t2_num[chi_index*self.N_t//2+index] = -np.real(np.sum(summand_t2_real*self.ell_bins[binL]))
                                     chi_index += 1
                                 index += 1
+
         if include_disconnected_term:
-            t_num = (t4_num+t2_num+self.t0_num)/self.sym_factor
+            
+            # Iterate over simulations
+            for ii in range(self.N_it):
+                if not compute_t0:
+                    if verb: print("# Assembling 2-field trispectrum numerator for simulation pair %d of %d "%(ii,self.N_it))
+                else:
+                    if verb: print("# Assembling 2-field and 0-field trispectrum numerator for simulation pair %d of %d"%(ii,self.N_it))
+
+                # Load processed bias simulations
+                if self.preload:
+                    this_H_a_maps = self.H_a_maps[ii]
+                    this_H_b_maps = self.H_b_maps[ii]
+                    this_A_aa_lms = self.A_aa_lms[ii]
+                    this_A_bb_lms = self.A_bb_lms[ii]
+                    this_A_ab_lms = self.A_ab_lms[ii]    
+                else:
+                    this_H_a_maps, this_H_b_maps, this_A_aa_lms, this_A_bb_lms, this_A_ab_lms = self.load_sim_data(ii)
+                
+                # Compute cross-spectra of simulations and data
+                this_A_ad_lms = self._compute_A_lms(this_H_a_maps,H_maps)
+                this_A_bd_lms = self._compute_A_lms(this_H_b_maps,H_maps)
+                del this_H_a_maps, this_H_b_maps
+
+                # Iterate over fields
+                index = 0
+                for u in self.fields:
+                    u1, u2, u3, u4 = [self.base.indices[u[i]] for i in range(4)]
+                    p_u = np.product([self.base.parities[u[i]] for i in range(4)])
+                    
+                    # Iterate over bins satisfying relevant conditions
+                    for bin1 in range(self.Nl):
+                        for bin2 in range(self.Nl_squeeze):
+                            if u1==u2 and bin2<bin1: continue
+                            for bin3 in range(self.Nl):
+                                if u1==u3 and u2==u4 and bin3<bin1: continue
+                                for bin4 in range(self.Nl_squeeze):
+                                    if u3==u4 and bin4<bin3: continue
+                                    if u1==u3 and u2==u4 and bin1==bin3 and bin4<bin2: continue
+
+                                    # Sum over 6 permutations and all MC fields
+                                    summand_t2 = 0.
+                                    # first set of fields (note we have already symmetrized over A_xy vs A_yx)
+                                    summand_t2 += A_dd_lms[u2][u1][bin2][bin1][1].conj()*this_A_aa_lms[u4][u3][bin4][bin3][0]+A_dd_lms[u2][u1][bin2][bin1][0]*this_A_aa_lms[u4][u3][bin4][bin3][1].conj()
+                                    summand_t2 += 4*(this_A_ad_lms[u2][u1][bin2][bin1][1].conj()*this_A_ad_lms[u4][u3][bin4][bin3][0]+this_A_ad_lms[u2][u1][bin2][bin1][0]*this_A_ad_lms[u4][u3][bin4][bin3][1].conj())
+                                    summand_t2 += this_A_aa_lms[u2][u1][bin2][bin1][1].conj()*A_dd_lms[u4][u3][bin4][bin3][0]+this_A_aa_lms[u2][u1][bin2][bin1][0]*A_dd_lms[u4][u3][bin4][bin3][1].conj()
+                                    # second set of fields
+                                    summand_t2 += A_dd_lms[u2][u1][bin2][bin1][1].conj()*this_A_bb_lms[u4][u3][bin4][bin3][0]+A_dd_lms[u2][u1][bin2][bin1][0]*this_A_bb_lms[u4][u3][bin4][bin3][1].conj()
+                                    summand_t2 += 4*(this_A_bd_lms[u2][u1][bin2][bin1][1].conj()*this_A_bd_lms[u4][u3][bin4][bin3][0]+this_A_bd_lms[u2][u1][bin2][bin1][0]*this_A_bd_lms[u4][u3][bin4][bin3][1].conj())
+                                    summand_t2 += this_A_bb_lms[u2][u1][bin2][bin1][1].conj()*A_dd_lms[u4][u3][bin4][bin3][0]+this_A_bb_lms[u2][u1][bin2][bin1][0]*A_dd_lms[u4][u3][bin4][bin3][1].conj()
+                                    summand_t2 = self.base.m_weight*summand_t2/self.N_it/4.
+
+                                    if compute_t0:
+                                        # Compute summands, summing over permutations and MC fields
+                                        # Note we have already symmetrized over A_xy vs A_yx
+                                        summand_t0 = 0.
+                                        summand_t0 += this_A_bb_lms[u2][u1][bin2][bin1][1].conj()*this_A_aa_lms[u4][u3][bin4][bin3][0]+this_A_bb_lms[u2][u1][bin2][bin1][0]*this_A_aa_lms[u4][u3][bin4][bin3][1].conj()
+                                        summand_t0 += 4*(this_A_ab_lms[u2][u1][bin2][bin1][1].conj()*this_A_ab_lms[u4][u3][bin4][bin3][0]+this_A_ab_lms[u2][u1][bin2][bin1][0]*this_A_ab_lms[u4][u3][bin4][bin3][1].conj())
+                                        summand_t0 += this_A_aa_lms[u2][u1][bin2][bin1][1].conj()*this_A_bb_lms[u4][u3][bin4][bin3][0]+this_A_aa_lms[u2][u1][bin2][bin1][0]*this_A_bb_lms[u4][u3][bin4][bin3][1].conj()
+                                        summand_t0 = self.base.m_weight*summand_t0/self.N_it/4.
+                                    
+                                    # Iterate over L bins
+                                    for binL in range(self.NL):
+                                        # skip bins outside the triangle conditions
+                                        if not self._check_bin(bin1,bin2,binL): continue
+                                        if not self._check_bin(bin3,bin4,binL): continue
+
+                                        # Assemble numerators for both parities
+                                        chi_index = 0
+                                        for chi in self.chi_arr:
+                                            if p_u*chi==-1:
+                                                summand_t2_real = 1.0j*summand_t2
+                                                if compute_t0: summand_t0_real = 1.0j*summand_t0
+                                            else:
+                                                summand_t2_real = summand_t2
+                                                if compute_t0: summand_t0_real = summand_t0
+                                            t2_num[chi_index*self.N_t//2+index] += -np.real(np.sum(summand_t2_real*self.ell_bins[binL]))
+                                            if compute_t0: t0_num[chi_index*self.N_t//2+index] += np.real(np.sum(summand_t0_real*self.ell_bins[binL]))
+                                            chi_index += 1
+                                        index += 1
+
+        # Load t0 from memory, if already computed
+        if not compute_t0:
+            t0_num = self.t0_num
+        else:
+            self.t0_num = t0_num
+
+        if include_disconnected_term:
+            t_num = (t4_num+t2_num+t0_num)/self.sym_factor
         else:
             t_num = t4_num/self.sym_factor
 
