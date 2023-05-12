@@ -263,75 +263,12 @@ class TSpec():
                         else:
                             this_lm_plus = (H_maps1[b1][u1][0]*H_maps2[b2][u2][0]+H_maps2[b1][u1][0]*H_maps1[b2][u2][0])/2.
                             this_lm_minus = (H_maps1[b1][u1][1]*H_maps2[b2][u2][1]+H_maps2[b1][u1][1]*H_maps1[b2][u2][1])/2.
-                        A_maps = self.base.to_lm_spin(this_lm_plus,this_lm_minus,2)[::-1].conj()
-                        A_lms3.append(A_maps)
+                        this_A_lm = self.base.to_lm_spin(this_lm_plus,this_lm_minus,2)[::-1].conj()
+                        A_lms3.append(this_A_lm)
                     A_lms2.append(A_lms3)
                 A_lms1.append(A_lms2)
             A_lms.append(A_lms1)
         return A_lms
-
-    def _compute_A_maps(self, A_lms):
-        """
-        Compute (+-2)A(n) maps for each pair of bins and L-bin, given A(L,M) and \bar{A}(L,M) fields. These are used in the trispectrum Fisher matrix.
-
-        Note that we sum over exchange of the two fields in A_lm, since this quantity is needed in the Fisher matrix.
-        """
-        A_maps = []
-        for u1 in range(1+2*self.pol):
-            A_maps1 = []
-            for u2 in range(u1+1):
-                A_maps2 = []
-                for b1 in range(self.Nl_squeeze):
-                    A_maps3 = []
-                    for b2 in range(self.Nl):
-                        if u1==u2 and b2>b1: continue
-                        A_maps4 = []
-                        for B in range(self.NL):
-                            if not self._check_bin(b1,b2,B):
-                                A_maps4.append([])
-                            else:
-                                A_maps4.append(self.base.to_map_spin(A_lms[u1][u2][b1][b2][0].conj()*self.ell_bins[B],A_lms[u1][u2][b1][b2][1].conj()*self.ell_bins[B],2))
-                        A_maps3.append(A_maps4)
-                    A_maps2.append(A_maps3)
-                A_maps1.append(A_maps2)
-            A_maps.append(A_maps1)
-        return A_maps
-
-    def _compute_HA_lms(self, H_maps, A_maps):
-        """
-        Compute the harmonic space maps Int[(-1)H(n)(+2)A(n)(+1)Y^*_lm] and Int[(+1)H(n)(-2)A(n)(-1)Y^*_lm] for each choice of bin 2, 3, 4, and L-bin and fields u2,u3,u4.
-        
-        This is used in the trispectrum Fisher matrix.
-
-        """    
-        HA_lms = []
-        for u2 in range(1+2*self.pol):
-            HA_lms1 = []
-            for u3 in range(1+2*self.pol):
-                HA_lms2 = []
-                for u4 in range(u3+1):
-                    HA_lms3 = []
-                    for b2 in range(self.Nl_squeeze):
-                        this_H = H_maps[b2][u2]
-                        HA_lms4 = []
-                        for b3 in range(self.Nl_squeeze):
-                            HA_lms5 = []
-                            for b4 in range(self.Nl):
-                                if u3==u4 and b4>b3: continue
-                                HA_lms6 = []
-                                for B in range(self.NL):
-                                    if not self._check_bin(b3,b4,B): 
-                                        HA_lms6.append([])
-                                    else:
-                                        this_A = A_maps[u3][u4][b3][b4][B]
-                                        HA_lms6.append(np.asarray([[1],[-1]])*self.base.to_lm_spin(this_H[1]*this_A[0],-this_H[0]*this_A[1],1))
-                                HA_lms5.append(HA_lms6)
-                            HA_lms4.append(HA_lms5)
-                        HA_lms3.append(HA_lms4)
-                    HA_lms2.append(HA_lms3)
-                HA_lms1.append(HA_lms2)
-            HA_lms.append(HA_lms1)
-        return HA_lms
 
     def _process_sim(self, sim_pair, input_type='map'):
         """
@@ -632,11 +569,11 @@ class TSpec():
                                             chi_index += 1
                                         index += 1
 
-        # Load t0 from memory, if already computed
-        if not compute_t0:
-            t0_num = self.t0_num
-        else:
-            self.t0_num = t0_num
+            # Load t0 from memory, if already computed
+            if not compute_t0:
+                t0_num = self.t0_num
+            else:
+                self.t0_num = t0_num
 
         if include_disconnected_term:
             t_num = (t4_num+t2_num+t0_num)/self.sym_factor
@@ -649,7 +586,7 @@ class TSpec():
         """
         This computes the contribution to the Fisher matrix from a single pair of GRF simulations, created internally.
         """
-        
+
         # Compute symmetry factors, if not already present
         if not hasattr(self, 'sym_factor'):
             self._compute_symmetry_factor()
@@ -657,10 +594,10 @@ class TSpec():
         # Initialize output
         fish = np.zeros((self.N_t,self.N_t),dtype='complex')
 
+        # Compute two random realizations with known power spectrum
         if verb: print("# Generating GRFs")
         a_maps = []
         for ii in range(2):
-            # Compute two random realizations with known power spectrum and weight appropriately
             if self.ones_mask:
                 a_maps.append(self.base.generate_data(seed=seed+int((1+ii)*1e9), output_type='harmonic'))
             else:
@@ -668,7 +605,15 @@ class TSpec():
                 
         # Define Q map code
         def compute_Q4(weighting):
-            """Compute Q4 map for a given choice of weighting (S or A)."""
+            """
+            Assemble and return an array of Q4 maps in real- or harmonic-space, for S^-1 or A^-1 weighting. 
+
+            This computes and stores maps with chi = +1 and -1 if parity='both'.
+
+            Schematically Q ~ (H[x]A[y,z]_lm + perms., and we dynamically compute each permutation of (H A)_lm.
+
+            The outputs are either Q(b) or WS^-1WQ(b).
+            """
 
             if weighting=='Sinv':
                 weighting_function = self.applySinv
@@ -682,113 +627,172 @@ class TSpec():
             else:
                 WUinv_a_lms = [self.base.to_lm(self.mask*weighting_function(a)) for a in a_maps]
 
-            # Compute (+-1)H maps
+            # Compute (+-1)H maps for all bins & fields
             if verb: print("Creating H maps")
             H_maps = [self._compute_H_maps(WUinv_a_lm) for WUinv_a_lm in WUinv_a_lms]
-            
-            # Compute A_lms for each pair of fields
-            if verb: print("Computing A-lm fields")
-            A_lms11 = self._compute_A_lms(H_maps[0])
-            A_lms22 = self._compute_A_lms(H_maps[1])
-            A_lms12 = self._compute_A_lms(H_maps[0],H_maps[1])
-            
-            # Compute A_maps for each pair of fields and L-bins
-            if verb: print("Computing A-maps")
-            A_maps11 = self._compute_A_maps(A_lms11)
-            A_maps22 = self._compute_A_maps(A_lms22)
-            A_maps12 = self._compute_A_maps(A_lms12)
-            
-            # Compute (H[x]A[y,z])_lm for each triplet of fields and bins
-            if verb: print("Computing (H A)_lm fields")
-            HA_lms111 = self._compute_HA_lms(H_maps[0], A_maps11)
-            HA_lms122 = self._compute_HA_lms(H_maps[0], A_maps22)
-            HA_lms112 = self._compute_HA_lms(H_maps[0], A_maps12)
-            HA_lms211 = self._compute_HA_lms(H_maps[1], A_maps11)
-            HA_lms222 = self._compute_HA_lms(H_maps[1], A_maps22)
-            HA_lms212 = self._compute_HA_lms(H_maps[1], A_maps12)
-            
-            def _assemble_Q_maps(HxAyz_lms, HyAxz_lms, HzAxy_lms, output_weighting=None):
-                """
-                Assemble and return the Q4 maps in real- or harmonic-space, given H and A maps. This computes maps with chi = +1 and -1 if parity='both'.
 
-                Schematically Q ~ (H[x]A[y,z]_lm + perms., and we input each permutation of (H A)_lm.
+            # Compute indices for each bin and field combination
+            indices = []
+            for u in self.fields:
+                u1, u2, u3, u4 = [self.base.indices[u[i]] for i in range(4)]
+                p_u = np.product([self.base.parities[u[i]] for i in range(4)])
 
-                We optionally assert symmetry in the A map under field interchange.
+                # Iterate over bins satisfying relevant conditions
+                for bin1 in range(self.Nl):
+                    for bin2 in range(self.Nl_squeeze):
+                        if u1==u2 and bin2<bin1: continue
 
-                The outputs are either Q(b) or WS^-1WQ(b).
-                """
-                # Define array
-                Q_maps = np.zeros((self.N_t,len(a_maps[0].ravel())),dtype='complex')
+                        for bin3 in range(self.Nl):
+                            if u1==u3 and u2==u4 and bin3<bin1: continue
+                            for bin4 in range(self.Nl_squeeze):
+                                if u3==u4 and bin4<bin3: continue
+                                if u1==u3 and u2==u4 and bin1==bin3 and bin4<bin2: continue
 
-                # Iterate over fields and bins
-                index = -1
-                for u in self.fields:
-                    u1, u2, u3, u4 = [self.base.indices[u[i]] for i in range(4)]
-                    p_u = np.product([self.base.parities[u[i]] for i in range(4)])
+                                for binL in range(self.NL):
+                                    # skip bins outside the triangle conditions
+                                    if not self._check_bin(bin1,bin2,binL): continue
+                                    if not self._check_bin(bin3,bin4,binL): continue
+                                    indices.append([u1,u2,u3,u4,bin1,bin2,bin3,bin4,binL,p_u])
+            indices = np.asarray(indices)
 
-                    # Iterate over bins satisfying relevant conditions
-                    for bin1 in range(self.Nl):
+            # Define output arrays
+            tmp_Q111 = np.zeros((self.N_t,1+2*self.pol,len(WUinv_a_lms[0][0])),dtype='complex')
+            tmp_Q222 = np.zeros((self.N_t,1+2*self.pol,len(WUinv_a_lms[0][0])),dtype='complex')
+            tmp_Q112 = np.zeros((self.N_t,1+2*self.pol,len(WUinv_a_lms[0][0])),dtype='complex')
+            tmp_Q122 = np.zeros((self.N_t,1+2*self.pol,len(WUinv_a_lms[0][0])),dtype='complex')
+            if verb: print("Allocating %.2f GB of memory"%(4*tmp_Q111.nbytes/1024./1024./1024.))
+
+            # Compute unique fields to iterate over
+            us = np.unique(indices[:,:4])
+
+            ## Iterate over first two fields 
+            for u1 in us:
+                for u2 in us:
+                    for bin1 in range(self.Nl_squeeze):
                         for bin2 in range(self.Nl_squeeze):
-                            if u1==u2 and bin2<bin1: continue
-                            for bin3 in range(self.Nl):
-                                if u1==u3 and u2==u4 and bin3<bin1: continue
-                                for bin4 in range(self.Nl_squeeze):
-                                    if u3==u4 and bin4<bin3: continue
-                                    if u1==u3 and u2==u4 and bin1==bin3 and bin4<bin2: continue
-                                    for binL in range(self.NL):
-                                        # skip bins outside the triangle conditions
-                                        if not self._check_bin(bin1,bin2,binL): continue
-                                        if not self._check_bin(bin3,bin4,binL): continue
-                                        index += 1
 
-                                        # Create harmonic-space Q^X_lm maps
-                                        tmp_Q = np.zeros((1+2*self.pol,2,len(WUinv_a_lms[0][0])),dtype='complex')
+                            # Check that this pair contributes later
+                            these_ind1a = np.where((indices[:,0]==u1)&(indices[:,1]==u2)&(indices[:,4]==bin1)&(indices[:,5]==bin2))[0]
+                            these_ind1b = np.where((indices[:,2]==u1)&(indices[:,3]==u2)&(indices[:,6]==bin1)&(indices[:,7]==bin2))[0]
+                            these_ind1 = np.concatenate([these_ind1a,these_ind1b])
+                            if len(these_ind1)==0: continue
 
-                                        ## Add all permutations (noting that we have already symmetrized over the two indices of A)
-                                        for HA_lms in [HxAyz_lms, HyAxz_lms, HzAxy_lms]:
-                                            tmp_Q[u1] -= 1./self.sym_factor[index]*self.ell_bins[bin1]*self.beam_lm[u1]*HA_lms[u2][u4][u3][bin2][bin4][bin3][binL].conj()
-                                            tmp_Q[u2] -= 1./self.sym_factor[index]*self.ell_bins[bin2]*self.beam_lm[u2]*HA_lms[u1][u4][u3][bin1][bin4][bin3][binL].conj()
-                                            tmp_Q[u3] -= 1./self.sym_factor[index]*self.ell_bins[bin3]*self.beam_lm[u3]*HA_lms[u4][u2][u1][bin4][bin2][bin1][binL].conj()
-                                            tmp_Q[u4] -= 1./self.sym_factor[index]*self.ell_bins[bin4]*self.beam_lm[u4]*HA_lms[u3][u2][u1][bin3][bin2][bin1][binL].conj()
-                                            
-                                        # Define chi = +- 1 pieces
-                                        tmp_Q_p = tmp_Q[:,0]+p_u*tmp_Q[:,1] # chi = 1
-                                        tmp_Q_m = tmp_Q[:,0]-p_u*tmp_Q[:,1] # chi = -1
+                            if verb: print("Computing field %d,%d and bin %d,%d"%(u1,u2,bin1,bin2))
 
-                                        # Add imaginary parts if necessary
-                                        if p_u==1:
-                                            tmp_Q_m *= 1.0j
-                                        else:
-                                            tmp_Q_p *= 1.0j
+                            # Compute A_lm[u1,u2,bin1,bin2] for this bin pair
+                            def compute_A_lm(H_maps1, H_maps2, one_field=True):
+                                if one_field:
+                                    this_lm_plus = H_maps1[bin1][u1][0]*H_maps2[bin2][u2][0]
+                                    this_lm_minus = H_maps1[bin1][u1][1]*H_maps2[bin2][u2][1]
+                                else:
+                                    this_lm_plus = (H_maps1[bin1][u1][0]*H_maps2[bin2][u2][0]+H_maps2[bin1][u1][0]*H_maps1[bin2][u2][0])/2.
+                                    this_lm_minus = (H_maps1[bin1][u1][1]*H_maps2[bin2][u2][1]+H_maps2[bin1][u1][1]*H_maps1[bin2][u2][1])/2.
+                                return self.base.to_lm_spin(this_lm_plus,this_lm_minus,2)[::-1].conj()
 
-                                        # Optionally apply weighting and add to output arrays
-                                        if weighting=='Ainv':
-                                            if self.ones_mask:
-                                                if self.parity=='even' or 'both': Q_maps[index] = self.applySinv(tmp_Q_p,input_type='harmonic',output_type='harmonic').ravel()
-                                                if self.parity=='both': Q_maps[index+self.N_t//2] = self.applySinv(tmp_Q_m,input_type='harmonic',output_type='harmonic').ravel()
-                                                if self.parity=='odd': Q_maps[index] = self.applySinv(tmp_Q_m,input_type='harmonic',output_type='harmonic').ravel()
+                            A_lms11 = compute_A_lm(H_maps[0],H_maps[0],one_field=True)
+                            A_lms22 = compute_A_lm(H_maps[1],H_maps[1],one_field=True)
+                            A_lms12 = compute_A_lm(H_maps[0],H_maps[1],one_field=False)
+
+                            # Iterate over all L bins of interest
+                            for binL in np.unique(indices[these_ind1,8]):
+                                
+                                # Find indices this contributes to
+                                these_ind2a = np.where((indices[:,0]==u1)&(indices[:,1]==u2)&(indices[:,4]==bin1)&(indices[:,5]==bin2)&(indices[:,8]==binL))[0]    
+                                these_ind2b = np.where((indices[:,2]==u1)&(indices[:,3]==u2)&(indices[:,6]==bin1)&(indices[:,7]==bin2)&(indices[:,8]==binL))[0]    
+                                these_ind2 = np.concatenate([these_ind2a,these_ind2b])
+                                if len(these_ind2)==0: continue
+                                
+                                # Compute A_map[u1,u2,bin1,bin2,binL]
+                                def compute_A_map(A_lms):
+                                    return self.base.to_map_spin(A_lms[0].conj()*self.ell_bins[binL],A_lms[1].conj()*self.ell_bins[binL],2)
+                                this_A11 = compute_A_map(A_lms11)
+                                this_A22 = compute_A_map(A_lms22)
+                                this_A12 = compute_A_map(A_lms12)
+                                
+                                # Compute all (H A)_lm fields of interest
+                                def compute_HA_lm(H_map, A_map):
+                                    return np.asarray([[1],[-1]])*self.base.to_lm_spin(H_map[1]*A_map[0],-H_map[0]*A_map[1],1)
+                                
+                                HA_lms = {}
+                                ub_pairs = np.unique(np.hstack([[indices[these_ind2a,2],indices[these_ind2a,6]],[indices[these_ind2a,3],indices[these_ind2a,7]],
+                                                                [indices[these_ind2b,0],indices[these_ind2b,4]],[indices[these_ind2b,1],indices[these_ind2b,5]]]),axis=1).T
+                                for jj in range(len(ub_pairs)):
+                                    u,b = ub_pairs[jj]
+                                    HA_111 = compute_HA_lm(H_maps[0][b][u],this_A11)
+                                    HA_222 = compute_HA_lm(H_maps[1][b][u],this_A22)
+                                    HA_112 = compute_HA_lm(H_maps[0][b][u],this_A12)
+                                    HA_122 = compute_HA_lm(H_maps[0][b][u],this_A22)
+                                    HA_211 = compute_HA_lm(H_maps[1][b][u],this_A11)
+                                    HA_212 = compute_HA_lm(H_maps[1][b][u],this_A12)
+                                    HA_lms[u,b] = [HA_111,HA_222,HA_112,HA_122,HA_211,HA_212]
+                                
+                                # Compute Q_lm pieces and add to array
+                                def add_Q4_element(u3_index, u4_index, bin3_index, bin4_index, these_ind):
+
+                                    ## Iterate over remaining fields
+                                    for ii in these_ind:
+                                        u3 = indices[ii,u3_index]
+                                        u4 = indices[ii,u4_index]
+                                        bin3 = indices[ii,bin3_index]
+                                        bin4 = indices[ii,bin4_index]
+                                        p_u = indices[ii,-1]
+
+                                        HA_111_lms3, HA_222_lms3, HA_112_lms3, HA_122_lms3, HA_211_lms3, HA_212_lms3 = HA_lms[u3,bin3]
+                                        HA_111_lms4, HA_222_lms4, HA_112_lms4, HA_122_lms4, HA_211_lms4, HA_212_lms4 = HA_lms[u4,bin4]
+
+                                        def add_to_tmp_Q(bin3, u3, bin4, u4, HA_lms3, HA_lms4, tmp_Q):
+                                            # Create harmonic-space Q^X_lm maps
+                                            this_Q = np.zeros((1+2*self.pol,2,len(WUinv_a_lms[0][0])),dtype='complex')
+
+                                            ## Add all permutations (noting that we have already symmetrized over the two indices of A)
+                                            this_Q[u3] -= 1./self.sym_factor[ii]*self.ell_bins[bin3]*self.beam_lm[u3]*HA_lms4.conj()  
+                                            this_Q[u4] -= 1./self.sym_factor[ii]*self.ell_bins[bin4]*self.beam_lm[u4]*HA_lms3.conj()  
+
+                                            # Compute parity +/- terms
+                                            if p_u==1:
+                                                tmp_Q_p = this_Q[:,0]+p_u*this_Q[:,1] # chi = 1
+                                                tmp_Q_m = 1.0j*(this_Q[:,0]-p_u*this_Q[:,1]) # chi = -1
                                             else:
-                                                if self.parity=='even' or 'both': Q_maps[index] = (self.mask*self.applySinv(self.mask*self.base.to_map(tmp_Q_p))).ravel()
-                                                if self.parity=='both': Q_maps[index+self.N_t//2] = (self.mask*self.applySinv(self.mask*self.base.to_map(tmp_Q_m))).ravel()
-                                                if self.parity=='odd': Q_maps[index] = (self.mask*self.applySinv(self.mask*self.base.to_map(tmp_Q_m))).ravel()
-                                        elif weighting=='Sinv':
-                                            if self.ones_mask:
-                                                if self.parity=='even' or 'both': Q_maps[index] = (self.base.m_weight*tmp_Q_p).ravel()
-                                                if self.parity=='both': Q_maps[index+self.N_t//2] = (self.base.m_weight*tmp_Q_m).ravel()
-                                                if self.parity=='odd': Q_maps[index] = (self.base.m_weight*tmp_Q_m).ravel()
-                                            else:
-                                                if self.parity=='even' or 'both': Q_maps[index] = self.base.A_pix*self.base.to_map(tmp_Q_p).ravel()
-                                                if self.parity=='both': Q_maps[index+self.N_t//2] = self.base.A_pix*self.base.to_map(tmp_Q_m).ravel()
-                                                if self.parity=='odd': Q_maps[index] = self.base.A_pix*self.base.to_map(tmp_Q_m).ravel()
+                                                tmp_Q_p = 1.0j*(this_Q[:,0]+p_u*this_Q[:,1]) # chi = 1
+                                                tmp_Q_m = this_Q[:,0]-p_u*this_Q[:,1] # chi = -1
+
+                                            if self.parity=='even' or 'both':
+                                                tmp_Q[ii] += tmp_Q_p
+                                            if self.parity=='both':
+                                                tmp_Q[ii+self.N_t//2] += tmp_Q_m
+                                            if self.parity=='odd':
+                                                tmp_Q[ii] += tmp_Q_m
+
+                                        add_to_tmp_Q(bin3, u3, bin4, u4, 3*HA_111_lms3, 3*HA_111_lms4, tmp_Q111)
+                                        add_to_tmp_Q(bin3, u3, bin4, u4, 3*HA_222_lms3, 3*HA_222_lms4, tmp_Q222)
+                                        add_to_tmp_Q(bin3, u3, bin4, u4, 2*HA_112_lms3+HA_211_lms3, 2*HA_112_lms4+HA_211_lms4, tmp_Q112)
+                                        add_to_tmp_Q(bin3, u3, bin4, u4, 2*HA_212_lms3+HA_122_lms3, 2*HA_212_lms4+HA_122_lms4, tmp_Q122)
+                                        
+                                add_Q4_element(2,3,6,7,these_ind2a)
+                                add_Q4_element(0,1,4,5,these_ind2b)      
+
+            def weight_Q_maps(tmp_Q):
+                # Optionally apply weighting and add to output arrays
+                Q_maps = np.zeros((self.N_t,len(a_maps[0].ravel())),dtype='complex')
+                for index in range(self.N_t):
+                    if weighting=='Ainv':
+                        if self.ones_mask:
+                            Q_maps[index] = self.applySinv(tmp_Q[index],input_type='harmonic',output_type='harmonic').ravel()
+                        else:
+                            Q_maps[index] = (self.mask*self.applySinv(self.mask*self.base.to_map(tmp_Q[index]))).ravel()
+                    elif weighting=='Sinv':
+                        if self.ones_mask:
+                            Q_maps[index] = (self.base.m_weight*tmp_Q[index]).ravel()
+                        else:
+                            Q_maps[index] = self.base.A_pix*self.base.to_map(tmp_Q[index]).ravel()
                 return Q_maps
 
-            # Compute pairs of H-maps and A-maps
-            if verb: print("Computing Q(b) maps")
-            Q_maps111 = _assemble_Q_maps(HA_lms111, HA_lms111, HA_lms111)
-            Q_maps222 = _assemble_Q_maps(HA_lms222, HA_lms222, HA_lms222)
-            Q_maps112 = _assemble_Q_maps(HA_lms112, HA_lms112, HA_lms211)
-            Q_maps122 = _assemble_Q_maps(HA_lms122, HA_lms212, HA_lms212)
-            
+            if weighting=='Ainv' and verb: print("Applying S^-1 weighting to output")
+            Q_maps111 = weight_Q_maps(tmp_Q111)
+            Q_maps222 = weight_Q_maps(tmp_Q222)
+            Q_maps112 = weight_Q_maps(tmp_Q112)
+            Q_maps122 = weight_Q_maps(tmp_Q122)
+
             return Q_maps111, Q_maps222, Q_maps112, Q_maps122
 
         # Compute Q4 maps
@@ -796,23 +800,21 @@ class TSpec():
         Q4_Sinv = compute_Q4('Sinv')
         if verb: print("\n# Computing Q4 map for A^-1 weighting")
         Q4_Ainv = compute_Q4('Ainv')
-        
+
         # Assemble Fisher matrix
         if verb: print("\n# Assembling Fisher matrix\n")
-        
+
         # Compute Fisher matrix as an outer product
         fish += (Q4_Sinv[0].conj())@(Q4_Ainv[0].T)
         fish += (Q4_Sinv[1].conj())@(Q4_Ainv[1].T)
         fish += 9.*(Q4_Sinv[2].conj())@(Q4_Ainv[2].T)
         fish += 9.*(Q4_Sinv[3].conj())@(Q4_Ainv[3].T)
         fish -= 6.*(Q4_Sinv[0].conj())@(Q4_Ainv[3].T)
-        fish -= 6.*(Q4_Sinv[1].conj())@(Q4_Ainv[2].T)
-        
+        fish -= 6.*(Q4_Sinv[1].conj())@(Q4_Ainv[2].T)        
         fish = fish.conj()/24./48.
-        
+
         return fish.real
-
-
+    
     def compute_fisher(self, N_it, N_cpus=1, verb=False):
         """
         Compute the Fisher matrix using N_it realizations. If N_cpus > 1, this parallelizes the operations (though HEALPix is already parallelized so the speed-up is not particularly significant).
@@ -1029,8 +1031,11 @@ class TSpec():
             
             fish = np.zeros((self.N_t, self.N_t))
             
-            if verb and (index_input%10)==0: print("Computing Fisher matrix row %d of %d"%(index_input+1,self.N_t))
-        
+            if self.parity=='both':
+                if verb and (index_input%10)==0: print("Computing Fisher matrix row %d of %d"%(index_input+1,self.N_t//2))
+            else:
+               if verb and (index_input%10)==0: print("Computing Fisher matrix row %d of %d"%(index_input+1,self.N_t))
+            
             # Iterate over first set of fields, parities, and bins
             index = -1
             for u in self.fields:
@@ -1217,15 +1222,17 @@ class TSpec():
             return fish
     
         # Assemble matrix, multiprocessing if necessary
+        degeneracy = 1+(self.parity=='both')
+
         if N_cpus==1:
             fish = np.zeros((self.N_t, self.N_t))
-            for i in range(self.N_t):
+            for i in range(self.N_t//degeneracy):
                 fish += _iterator(i,verb=verb)
         else:
             p = mp.Pool(N_cpus)
             if verb: print("Multiprocessing computation on %d cores"%N_cpus)
 
-            result = list(tqdm.tqdm(p.imap_unordered(_iterator,range(self.N_t)),total=self.N_t))
+            result = list(tqdm.tqdm(p.imap_unordered(_iterator,range(self.N_t//degeneracy)),total=self.N_t//degeneracy))
             fish = np.sum(result,axis=0)
         
         if verb: print("Fisher matrix computation complete\n")

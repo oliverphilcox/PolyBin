@@ -25,7 +25,7 @@ parity = 'odd'
 N_it = 100 # Number of random iterations to compute 2- and 0-field terms
 
 # Binning parameters
-l_bins = np.load('/mnt/home/ophilcox/PolyBin/planck_public/l_bins_data.npy')
+l_bins = np.load('/mnt/home/ophilcox/PolyBin/planck_public/l_bins_data_pol.npy')
 l_bins_squeeze = l_bins.copy()
 L_bins = l_bins.copy()
 print("binned lmax: %d, HEALPix lmax: %d"%(np.max(l_bins_squeeze),lmax))
@@ -65,7 +65,8 @@ assert len(Sl_weighting['TT'])==lmax+1
 base = pb.PolyBin(Nside, Sl_weighting, beam=beam, pol=True, backend='libsharp', include_pixel_window=include_pixel_window)
 
 # Check if output exists
-outfile = outroot+'trispectrum_numerator%d_(%d,%d,%d).txt'%(sim_id,len(l_bins)-1,len(l_bins_squeeze)-1,len(L_bins)-1)
+outfile = outroot+'trispectrum_numerator%d_(%d,%d,%d).npy'%(sim_id,len(l_bins)-1,len(l_bins_squeeze)-1,len(L_bins)-1)
+outfile2 = outroot+'trispectrum_numerator_4field%d_(%d,%d,%d).npy'%(sim_id,len(l_bins)-1,len(l_bins_squeeze)-1,len(L_bins)-1)
 
 if os.path.exists(outfile):
     print("Fisher matrix already computed; exiting!")
@@ -75,23 +76,8 @@ if os.path.exists(outfile):
 smooth_mask = healpy.read_map(root+'smooth_mask%d.fits'%Nside)
 inpainting_mask = healpy.read_map(root+'inpainting_mask%d.fits'%Nside)
 
-# Define S^-1 weighting for each l,m
-
 # Interpolate S_l to all ell and m values
 ls = np.arange(lmax+1)
-Sl = [Sl_weighting['TT'],Sl_weighting['TE'],Sl_weighting['TB'],Sl_weighting['EE'],Sl_weighting['EB'],Sl_weighting['BB']]
-Sl_lm = [InterpolatedUnivariateSpline(ls, Sl[i])(base.l_arr) for i in range(len(Sl))]
-
-# Compute full matrix of C^XY_lm and C^XY_l
-Sl_lm_mat = np.moveaxis(np.asarray([[Sl_lm[0],Sl_lm[1],Sl_lm[2]],
-                                    [Sl_lm[1],Sl_lm[3],Sl_lm[4]],
-                                    [Sl_lm[2],Sl_lm[4],Sl_lm[5]]]),[2,1,0],[0,2,1])
-
-# Check that matrix is well-posed 
-assert (np.linalg.det(Sl_lm_mat)>0).all(), "Determinant of S_l^{XY} matrix is <= 0; are the input power spectra set correctly?"
-
-# Invert matrix for each l,m
-inv_Sl_lm_mat = np.moveaxis(np.linalg.inv(Sl_lm_mat),[0,1,2],[2,0,1])
 
 ########################### LOAD DATA ###########################
 if sim_id==-1:
@@ -161,14 +147,10 @@ def applySinv(input_map, input_type='map', output_type='map'):
 # Initialize trispectrum class
 tspec = pb.TSpec(base, 1.+0.*smooth_mask, applySinv, l_bins, l_bins_squeeze=l_bins_squeeze, L_bins=L_bins, fields=fields, parity=parity)
 
-### Read in pairs of MC simulations created externally for the two-field and zero-field terms
-alpha_sims = []
-
-print("Loading simulations")
-load_time = time.time()
-for jj in range(sim_id+1,sim_id+1+N_it,2):
-    ii = jj%300
-    iip1 = (jj+1)%300
+### Define function to read in pairs of MC simulations created externally for the two-field and zero-field terms
+def load_ffp10(index):
+    ii = (index*2+sim_id+1)%300
+    iip1 = (ii+1)%300
     print("Loading simulations %d and %d of %d"%(ii,iip1,N_it))
     
     # Load first simulations
@@ -186,19 +168,31 @@ for jj in range(sim_id+1,sim_id+1+N_it,2):
     sim2 = cmb_ii + noise_ii
     
     # Add to outputs
-    alpha_sims.append([sim1,sim2])
+    return [sim1,sim2]
 
 # Load into PolyBin
-tspec.load_sims(alpha_sims, verb=True, preload=False)
+tspec.load_sims(load_ffp10, N_it//2, verb=True, preload=False)
 
 # Compute trispectrum numerator
 print("Starting numerator computation")
 start = time.time()
-numerator = tspec.Tl_numerator(data, parity='both', include_disconnected_term=True, verb=True)
+numerator = tspec.Tl_numerator(data, include_disconnected_term=True, verb=True)
 print("Computed trispectrum contribution after %.2f s"%(time.time()-start))
 
 # Print some diagnostics
 print("Computation complete using %d forward and %d reverse SHTs"%(base.n_SHTs_forward, base.n_SHTs_reverse))
 
-np.savetxt(outfile,np.concatenate(numerator))
-print("Output saved to %s; exiting after %.2f seconds"%(outfile,time.time()-init))
+np.save(outfile,numerator)
+print("Output saved to %s"%outfile)
+
+### Repeat without disconnected terms
+start = time.time()
+base.n_SHTs_forward, base.n_SHTs_reverse = 0,0
+numerator2 = tspec.Tl_numerator(data, include_disconnected_term=False, verb=True)
+
+# Print some diagnostics
+print("Computed trispectrum contribution w/o disconnected pieces after %.2f s"%(time.time()-start))
+print("Computation complete using %d forward and %d reverse SHTs"%(base.n_SHTs_forward, base.n_SHTs_reverse))
+
+np.save(outfile2,numerator2)
+print("Output saved to %s"%(outfile2))

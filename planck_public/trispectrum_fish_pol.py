@@ -22,7 +22,7 @@ fields = ['TTTT','TTTE','TTEE','TETE','TEEE','EEEE']
 parity = 'odd'
 
 # Binning parameters
-l_bins = np.load('/mnt/home/ophilcox/PolyBin/planck_public/l_bins_data.npy')
+l_bins = np.load('/mnt/home/ophilcox/PolyBin/planck_public/l_bins_data_pol.npy')
 l_bins_squeeze = l_bins.copy()
 L_bins = l_bins.copy()
 print("binned lmax: %d, HEALPix lmax: %d"%(np.max(l_bins_squeeze),lmax))
