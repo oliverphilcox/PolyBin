@@ -31,7 +31,8 @@ outdir = '/mnt/ceph/users/ophilcox/polybin_testing/Bl/'
 
 # Bin edges (could also be non-linearly spaced)
 power = 3./2.
-l_bins = np.asarray([2]+list(np.asarray(np.arange(4**(1./power),422**(1./power),14.0**(1./power))**power,dtype='int')))
+#l_bins = np.asarray([2]+list(np.asarray(np.arange(4**(1./power),422**(1./power),14.0**(1./power))**power,dtype='int')))
+l_bins = np.asarray([2]+list(np.asarray(np.arange(5**(1./power),492**(1./power),18.0**(1./power))**power,dtype='int')))
 Nl = len(l_bins)-1
 print("binned lmax: %d, HEALPix lmax: %d"%(np.max(l_bins),lmax))
 assert lmax>np.max(l_bins)
@@ -157,6 +158,10 @@ bspec = pb.BSpec(base, mask, applySinv, l_bins, fields=fields, parity='both')
 out_fish = outdir+'Bl_ideal%d.npy'%option
 if not os.path.exists(out_fish):
     t1 = time.time()
-    fish_ideal = bspec.compute_fisher_ideal(verb=True,N_cpus=40)
+    try:
+        fish_ideal = bspec.compute_fisher_ideal(verb=True,N_cpus=40)
+    except:
+        print("Inversion error!")
+        pass
     np.save(out_fish, fish_ideal)
     print("Ideal Fisher computation complete in %.2f seconds"%(time.time()-t1))

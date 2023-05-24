@@ -1,0 +1,5 @@
+srun: error: NodeNames=worker3241 CPUs=20 match no Sockets, Sockets*CoresPerSocket or Sockets*CoresPerSocket*ThreadsPerCore. Resetting CPUs.
+srun: Job step aborted: Waiting up to 62 seconds for job step to finish.
+slurmstepd: error: *** STEP 2380809.11 ON worker5259 CANCELLED AT 2023-05-23T20:10:43 ***
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>

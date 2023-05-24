@@ -236,7 +236,7 @@ class TSpec():
             H_pm1_maps.append([np.asarray([[1],[-1]])*self.base.to_map_spin(self.ell_bins[bin1]*self.beam_lm[i]*h_lm[i].conj(),-1.*self.ell_bins[bin1]*self.beam_lm[i]*h_lm[i].conj(),1) for i in range(len(h_lm))])
         return H_pm1_maps
 
-    def _compute_A_lms(self, H_maps1, H_maps2 = []):
+    def _compute_A_lms(self, H_maps1, H_maps2=[]):
         """
         Compute A(L,M) and \bar{A}(L,M) fields for each bin pair given (+-1)H(n) maps. These are used in the trispectrum numerators. Note that we restrict to bin2 <= bin1 if u1=u2, by symmetry, and each element contains [A, \bar{A}].
         
@@ -573,10 +573,10 @@ class TSpec():
             if not compute_t0:
                 t0_num = self.t0_num
             else:
-                self.t0_num = t0_num
+                self.t0_num = t0_num/self.sym_factor
 
         if include_disconnected_term:
-            t_num = (t4_num+t2_num+t0_num)/self.sym_factor
+            t_num = (t4_num+t2_num)/self.sym_factor+self.t0_num
         else:
             t_num = t4_num/self.sym_factor
 
@@ -888,10 +888,123 @@ class TSpec():
 
         return Tl_dict
 
+    def _compute_t0_t2_ideal(self, Cinv_data_lm, N_cpus=4, verb=False):
+        """Compute the 0- and 2-field terms for the ideal trispectrum estimator. This is multiprocessed for speed (as it involves an expensive O(lmax^3) summation)."""
+
+        # Compute empirical power spectrum estimates  
+        if verb: print("Computing empirical power spectra")
+        Cinv_l_empirical = []
+        for u1 in range(1+2*self.pol):
+            Cinv_l_empirical1 = []
+            for u2 in range(u1+1):
+                Cinv_data_lm_sq = 0.5*(Cinv_data_lm[u1]*np.conj(Cinv_data_lm[u2])+Cinv_data_lm[u2]*np.conj(Cinv_data_lm[u1]))*self.base.m_weight
+                Cinv_l_empirical1.append([np.real(np.sum(Cinv_data_lm_sq[self.base.l_arr==l]*self.beam[u1][l]*self.beam[u2][l])/(2*l+1)) for l in range(np.max(self.l_bins_squeeze))])
+            Cinv_l_empirical.append(Cinv_l_empirical1)            
+        
+        if verb: print("Assembling 2- and 0-field trispectrum numerator")
+        
+        global _iterator
+        def _iterator(input_index, verb=verb):
+
+            # Define 2- and 0-field arrays
+            t2_num_ideal = np.zeros(self.N_t)
+            t0_num_ideal = np.zeros(self.N_t)
+        
+            # Iterate over fields
+            index = 0
+            for u in self.fields:
+                u1, u2, u3, u4 = [self.base.indices[u[i]] for i in range(4)]
+                p_u = np.product([self.base.parities[u[i]] for i in range(4)])
+                
+                # Iterate over bins satisfying relevant conditions
+                for bin1 in range(self.Nl):
+                    for bin2 in range(self.Nl_squeeze):
+                        if u1==u2 and bin2<bin1: continue
+                        for bin3 in range(self.Nl):
+                            if u1==u3 and u2==u4 and bin3<bin1: continue
+                            for bin4 in range(self.Nl_squeeze):
+                                if u3==u4 and bin4<bin3: continue
+                                if u1==u3 and u2==u4 and bin1==bin3 and bin4<bin2: continue
+
+                                # Iterate over L bins
+                                for binL in range(self.NL):
+                                    # skip bins outside the triangle conditions
+                                    if not self._check_bin(bin1,bin2,binL): continue
+                                    if not self._check_bin(bin3,bin4,binL): continue
+
+                                    # Only analyze a single element here
+                                    if index!=input_index: 
+                                        index += 1
+                                        continue                               
+
+                                    # Check if two external bins are equal (if not, no contribution to 2- and 0-field terms)
+                                    if ((bin1==bin3)*(bin2==bin4)+(bin1==bin4)*(bin2==bin3))==0:
+                                        index += 1
+                                        continue
+                                    # Check if we contribute to the correct parity (we need chi*p_u=1 here!)
+                                    if p_u==-1 and self.parity=='even': 
+                                        index += 1
+                                        continue
+                                    if p_u==1 and self.parity=='odd':
+                                        index += 1
+                                        continue
+                                    
+                                    # Sum over ells for two- and zero-point terms
+                                    value2, value0 = 0., 0.
+                                    for l1 in range(self.l_bins[bin1],self.l_bins[bin1+1]):
+                                        for l2 in range(self.l_bins_squeeze[bin2],self.l_bins_squeeze[bin2+1]):
+                                            for L in range(max(self.L_bins[binL],abs(l1-l2)),min(self.L_bins[binL+1],l1+l2+1)):
+
+                                                # define 3j symbols with spin (-1, -1, 2)
+                                                tjs = self.threej(l1,l2,L)**2.
+                                                if tjs==0: continue
+                                                pref = (2*L+1.)*(2*l1+1.)*(2*l2+1.)/(4.*np.pi)*tjs*(-1.)**(l1+l2+L)
+                                                
+                                                # First permutation
+                                                if (bin1==bin3)*(bin2==bin4):
+                                                    value2 -= pref*Cinv_l_empirical[max([u2,u4])][min([u2,u4])][l2]*self.base.inv_Cl_mat[u3,u1][l1]*self.beam[u1][l1]*self.beam[u3][l1]
+                                                    value2 -= pref*Cinv_l_empirical[max([u1,u3])][min([u1,u3])][l1]*self.base.inv_Cl_mat[u4,u2][l2]*self.beam[u2][l2]*self.beam[u4][l2]
+                                                    value0 += pref*self.base.inv_Cl_mat[u3,u1][l1]*self.base.inv_Cl_mat[u4,u2][l2]*self.beam[u1][l1]*self.beam[u3][l1]*self.beam[u2][l2]*self.beam[u4][l2]
+                                                
+                                                # Second permutation
+                                                if (bin1==bin4)*(bin2==bin3):                                                    
+                                                    value2 -= pref*Cinv_l_empirical[max([u2,u3])][min([u2,u3])][l2]*self.base.inv_Cl_mat[u4,u1][l1]*self.beam[u1][l1]*self.beam[u4][l1]
+                                                    value2 -= pref*Cinv_l_empirical[max([u1,u4])][min([u1,u4])][l1]*self.base.inv_Cl_mat[u3,u2][l2]*self.beam[u2][l2]*self.beam[u3][l2]
+                                                    value0 += pref*self.base.inv_Cl_mat[u4,u1][l1]*self.base.inv_Cl_mat[u3,u2][l2]*self.beam[u1][l1]*self.beam[u4][l1]*self.beam[u3][l2]*self.beam[u2][l2]
+                                                
+                                    # Add to output arrays, depending on parity
+                                    chi_index = 0
+                                    for chi in self.chi_arr:
+                                        if p_u*chi==-1: 
+                                            chi_index += 1
+                                            continue
+                                        t2_num_ideal[chi_index*self.N_t//2+index] = value2
+                                        t0_num_ideal[chi_index*self.N_t//2+index] = value0
+                                        chi_index += 1
+
+                                    index += 1
+        
+            t2 =  t2_num_ideal/np.mean(self.mask**2)/self.sym_factor
+            t0 = t0_num_ideal/self.sym_factor
+            return t2, t0
+
+        # Multiprocess computation
+        p = mp.Pool(N_cpus)
+        if self.parity=='both':
+            n_elem = len(self.sym_factor)//2
+        else:
+            n_elem  = len(self.sym_factor)
+        t02_num = list(tqdm.tqdm(p.imap_unordered(_iterator, np.arange(n_elem)), total=n_elem))
+        
+        # Reconfigure output
+        t2_num = np.asarray([t[0] for t in t02_num]).sum(axis=0)
+        t0_num = np.asarray([t[1] for t in t02_num]).sum(axis=0)
+        return t0_num, t2_num
+
     ### IDEAL ESTIMATOR
-    def Tl_numerator_ideal(self, data, verb=False, include_disconnected_term=True):
+    def Tl_numerator_ideal(self, data, verb=False, include_disconnected_term=True, N_cpus=4):
         """
-        Compute the numerator of the idealized trispectrum estimator. We normalize by < mask^4 >.
+        Compute the numerator of the idealized trispectrum estimator. We normalize by < mask^4 >, and can optionally multiprocess the operation.
 
         We can also optionally switch off the disconnected terms, which affects only parity-conserving trispectra.
         """
@@ -911,25 +1024,16 @@ class TSpec():
         if verb: print("Computing A_lm fields")
         A_lms = self._compute_A_lms(H_pm1_maps)
         
-        # Compute empirical power spectrum estimates  
-        if include_disconnected_term:
-            if verb: print("Computing empirical power spectra")
-            Cinv_l_empirical = []
-            for u1 in range(1+2*self.pol):
-                Cinv_l_empirical1 = []
-                for u2 in range(u1+1):
-                    Cinv_data_lm_sq = 0.5*(Cinv_data_lm[u1]*np.conj(Cinv_data_lm[u2])+Cinv_data_lm[u2]*np.conj(Cinv_data_lm[u1]))*self.base.m_weight
-                    Cinv_l_empirical1.append([np.real(np.sum(Cinv_data_lm_sq[self.base.l_arr==l]*self.beam[u1][l]*self.beam[u2][l])/(2*l+1)) for l in range(np.max(self.l_bins_squeeze))])
-                Cinv_l_empirical.append(Cinv_l_empirical1)            
-        
-        # Define 4-, 2- and 0-field arrays
-        t4_num_ideal = np.zeros(self.N_t)
+        # Optionally compute disconnected contributions
         if not include_disconnected_term:
             print("## No subtraction of (parity-conserving) disconnected terms performed!")
         else:
-            t2_num_ideal = np.zeros(self.N_t)
-            t0_num_ideal = np.zeros(self.N_t)
-        if verb: print("Assembling trispectrum numerator")
+            t0, t2 = self._compute_t0_t2_ideal(Cinv_data_lm, N_cpus=N_cpus, verb=verb)
+
+        # Define 4-field arrays
+        t4_num_ideal = np.zeros(self.N_t)
+        
+        if verb: print("\nAssembling trispectrum numerator")
         
         # Iterate over fields
         index = 0
@@ -967,50 +1071,18 @@ class TSpec():
                                     t4_num_ideal[chi_index*self.N_t//2+index] = np.real(np.sum(summand2*self.ell_bins[binL]))
                                     chi_index += 1
                                     
-                                # Compute disconnected terms
-                                if include_disconnected_term:
-                                    # Check if two external bins are equal (if not, no contribution to 2- and 0-field terms)
-                                    if ((bin1==bin3)*(bin2==bin4)+(bin1==bin4)*(bin2==bin3))==0:
-                                        index += 1
-                                        continue
-                                    
-                                    # Sum over ells for two- and zero-point terms
-                                    value2, value0 = 0., 0.
-                                    for l1 in range(self.l_bins[bin1],self.l_bins[bin1+1]):
-
-                                        for l2 in range(self.l_bins_squeeze[bin2],self.l_bins_squeeze[bin2+1]):
-
-                                            for L in range(self.L_bins[binL],self.L_bins[binL+1]):
-                                                if L<abs(l1-l2) or L>l1+l2: continue
-
-                                                # define 3j symbols with spin (-1, -1, 2)
-                                                tjs = self.threej(l1,l2,L)**2.
-                                                if tjs==0: continue
-                                                pref = (2*L+1.)*(2*l1+1.)*(2*l2+1.)/(4.*np.pi)*tjs*(-1.)**(l1+l2+L)
-                                                
-                                                # 2-field contribution
-                                                value2 -= pref*Cinv_l_empirical[max([u2,u4])][min([u2,u4])][l2]*self.base.inv_Cl_mat[u3,u1][l1]*self.beam[u1][l1]*self.beam[u3][l1]*(bin1==bin3)*(bin2==bin4)
-                                                value2 -= pref*Cinv_l_empirical[max([u1,u3])][min([u1,u3])][l1]*self.base.inv_Cl_mat[u4,u2][l2]*self.beam[u2][l2]*self.beam[u4][l2]*(bin1==bin3)*(bin2==bin4)
-                                                value2 -= pref*Cinv_l_empirical[max([u2,u3])][min([u2,u3])][l2]*self.base.inv_Cl_mat[u4,u1][l1]*self.beam[u1][l1]*self.beam[u4][l1]*(bin1==bin4)*(bin2==bin3)
-                                                value2 -= pref*Cinv_l_empirical[max([u1,u4])][min([u1,u4])][l1]*self.base.inv_Cl_mat[u3,u2][l2]*self.beam[u2][l2]*self.beam[u3][l2]*(bin1==bin4)*(bin2==bin3)
-                                                # 0-field contribution
-                                                value0 += pref*self.base.inv_Cl_mat[u3,u1][l1]*self.base.inv_Cl_mat[u4,u2][l2]*self.beam[u1][l1]*self.beam[u3][l1]*self.beam[u2][l2]*self.beam[u4][l2]*(bin1==bin3)*(bin2==bin4)
-                                                value0 += pref*self.base.inv_Cl_mat[u4,u1][l1]*self.base.inv_Cl_mat[u3,u2][l2]*self.beam[u1][l1]*self.beam[u4][l1]*self.beam[u3][l2]*self.beam[u2][l2]*(bin1==bin4)*(bin2==bin3)
-                                        t2_num_ideal[index] = value2
-                                        t0_num_ideal[index] = value0
-
                                 index += 1
         
         if include_disconnected_term:
-            t_num_ideal = (t4_num_ideal/np.mean(self.mask**4.)+t2_num_ideal/np.mean(self.mask**2.)+t0_num_ideal)/self.sym_factor
+            t_num_ideal = (t4_num_ideal/np.mean(self.mask**4.)/self.sym_factor)+t2+t0
         else:
             t_num_ideal = t4_num_ideal/np.mean(self.mask**4.)/self.sym_factor
         
         # Save t0 array for posterity
-        if include_disconnected_term: self.t0_num_ideal = t0_num_ideal
-            
+        if include_disconnected_term: self.t0_num_ideal = t0
+        
         return t_num_ideal
-
+    
     def compute_fisher_ideal(self, verb=False, N_cpus=1, diagonal=False):
         """
         This computes the idealized Fisher matrix for the trispectrum, including cross-correlations between fields. If N_cpus > 1, this parallelizes the operation.

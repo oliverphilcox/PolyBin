@@ -385,7 +385,7 @@ class BSpec():
 
                                 # skip bins outside the triangle conditions
                                 if not self._check_bin(bin1,bin2,bin3): continue
-
+                                
                                 # Compute combination of fields
                                 tmp_sum  = p1_H_maps[bin1][u1]*this_p1_H_maps[bin2][u2]*this_m2_H_maps[bin3][u3]
                                 tmp_sum += p1_H_maps[bin2][u2]*this_p1_H_maps[bin3][u3]*this_m2_H_maps[bin1][u1]
@@ -832,11 +832,11 @@ class BSpec():
 
         return fish
 
-    def Bl_ideal(self, data, fish_ideal=[], verb=False):
+    def Bl_ideal(self, data, fish_ideal=[], verb=False, N_cpus=1):
         """
         Compute the idealized bispectrum estimator, including normalization, if not supplied or already computed. Note that this normalizes by < mask^3 >.
         
-        Note that we return the imaginary part of odd-parity bispectra.
+        Note that we return the imaginary part of odd-parity bispectra. We can optionally multi-process computation of the ideal Fisher matrix.
         """
 
         if len(fish_ideal)!=0:
@@ -845,7 +845,7 @@ class BSpec():
 
         if not hasattr(self,'inv_fish_ideal'):
             print("Computing ideal Fisher matrix")
-            self.compute_fisher_ideal(verb=verb)
+            self.compute_fisher_ideal(verb=verb, N_cpus=N_cpus)
 
         # Compute numerator
         Bl_num_ideal = self.Bl_numerator_ideal(data, verb=verb)

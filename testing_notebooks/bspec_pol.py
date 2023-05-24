@@ -6,10 +6,12 @@ sys.path.append('/mnt/home/ophilcox/PolyBin/')
 import polybin as pb
 from scipy.interpolate import InterpolatedUnivariateSpline
 
-if len(sys.argv)!=3:
-    raise Exception("No option or sim-no input supplied!")
-option = int(sys.argv[1])
-sim_no = int(sys.argv[2])
+if len(sys.argv)!=2:
+#    raise Exception("No option or sim-no input supplied!")
+    raise Exception("No index supplied!")
+option = int(sys.argv[1])//100+1
+sim_no = int(sys.argv[1])%100
+print("Option: %d, Sim-no: %d"%(option,sim_no))
 
 # HEALPix settings
 Nside = 256
@@ -32,7 +34,8 @@ outdir = '/mnt/ceph/users/ophilcox/polybin_testing/Bl/'
 
 # Bin edges (could also be non-linearly spaced)
 power = 3./2.
-l_bins = np.asarray([2]+list(np.asarray(np.arange(4**(1./power),422**(1./power),14.0**(1./power))**power,dtype='int')))
+#l_bins = np.asarray([2]+list(np.asarray(np.arange(4**(1./power),422**(1./power),14.0**(1./power))**power,dtype='int')))
+l_bins = np.asarray([2]+list(np.asarray(np.arange(5**(1./power),492**(1./power),18.0**(1./power))**power,dtype='int')))
 Nl = len(l_bins)-1
 print("binned lmax: %d, HEALPix lmax: %d"%(np.max(l_bins),lmax))
 assert lmax>np.max(l_bins)
@@ -51,6 +54,9 @@ include_pixel_window = False
 
 # Whether to include bins only partially satisfying triangle conditions
 include_partial_triangles = False
+
+# how many of each thing to compute in this script
+r_sim = 10
 
 # Galactic Mask
 # Using GAL040 mask with 2-degree apodization for testing
@@ -126,18 +132,6 @@ b_input_fac = lambda l1: np.asarray([1.,1.*E_ratio, 0.*B_ratio]).reshape(-1,1)*n
 # Define class, optionally including polarization
 base = pb.PolyBin(Nside, Sl_fiducial, beam, include_pixel_window=include_pixel_window, pol=pol, backend=backend)
 
-# Generate unmasked data with known C_l and factorized b
-# Cl^XY are set to the fiducial spectrum unless otherwise specified
-# No beam is included
-print("Generating data")
-if option==1:
-    raw_data = base.generate_data(seed=42, add_B=True, b_input=b_input_fac, sum_ells='even')
-else:
-    raw_data = base.generate_data(seed=42, add_B=False)
-
-# Mask the map
-data = (raw_data*mask).reshape(len(raw_data),-1)
-
 def applySinv(input_map, input_type='map', output_type='map'):
     """Apply the quasi-optimal weighting, S^{-1} to a map in map- or harmonic-space. 
     
@@ -172,69 +166,68 @@ bspec = pb.BSpec(base, mask, applySinv, l_bins, fields=fields, parity='both')
 # Zero cou/mnt/home/ophilcox/ceph/ (for diagnostics only)
 base.n_SHTs_forward, base.n_SHTs_reverse = 0, 0
 
-# Compute Fisher matrix
-out_fish = outdir+'Bl_fish%d_%d.npy'%(option,sim_no)
-if not os.path.exists(out_fish):
-    if sim_no*10<N_it:
+# # Compute Fisher matrix
+# out_fish = outdir+'Bl_fish%d_%d.npy'%(option,sim_no)
+# if not os.path.exists(out_fish):
+#     if sim_no*10<N_it:
 
-        t1 = time.time()
-        fishs = []
-        for ii in range(10*sim_no,10*sim_no+10):
-            print("## Computing Fisher %d of %d"%(ii,N_it))
-            fishs.append(bspec.compute_fisher_contribution(ii, verb=(ii==10*sim_no)))
-        fishs = np.asarray(fishs)
-        np.save(out_fish, fishs)
-        print("Fisher computation complete, avering %.2f time, %d / %d SHTs"%((time.time()-t1)/10.,base.n_SHTs_forward//10, base.n_SHTs_reverse//10))
+#         t1 = time.time()
+#         fishs = []
+#         for ii in range(10*sim_no,10*sim_no+10):
+#             print("## Computing Fisher %d of %d"%(ii,N_it))
+#             fishs.append(bspec.compute_fisher_contribution(ii, verb=(ii==10*sim_no)))
+#         fishs = np.asarray(fishs)
+#         np.save(out_fish, fishs)
+#         print("Fisher computation complete, avering %.2f time, %d / %d SHTs"%((time.time()-t1)/10.,base.n_SHTs_forward//10, base.n_SHTs_reverse//10))
 
 ### Ideal simulations
 out_ideal = outdir+'Bl_ideal%d_%d.npy'%(option,sim_no)
 if not os.path.exists(out_ideal):
-    if sim_no*100<N_sim: 
-
+    
         t1 = time.time()
         base.n_SHTs_forward, base.n_SHTs_reverse = 0, 0
 
         bl_ideal = []
-        for ii in range(100*sim_no,100*sim_no+100):
+        for ii in range(r_sim*sim_no,r_sim*sim_no+r_sim):
             print("Analyzing sim %d of %d"%(ii+1,N_sim))
             if option==1:
                 raw_sim = base.generate_data(seed=ii, add_B=True, b_input=b_input_fac, sum_ells='even')
             else:
                 raw_sim = base.generate_data(seed=ii, add_B=False)
             sim = mask*raw_sim
-            bl_ideal.append(bspec.Bl_numerator_ideal(sim,verb=(ii==100*sim_no)))
+            bl_ideal.append(bspec.Bl_numerator_ideal(sim,verb=(ii==r_sim*sim_no)))
         bl_ideal = np.asarray(bl_ideal)
-        print("Ideal sim computation complete, averaging %.2f time, %d / %d SHTs"%((time.time()-t1)/100.,base.n_SHTs_forward//100,base.n_SHTs_reverse//100))
+        print("Ideal sim computation complete, averaging %.2f time, %d / %d SHTs"%((time.time()-t1)/r_sim,base.n_SHTs_forward//r_sim,base.n_SHTs_reverse//r_sim))
         
         np.save(out_ideal,bl_ideal)
 
 ### Unwindowed simulations (without 1-field)
 out_unwindowed = outdir+'Bl_unwindowed_3field%d_%d.npy'%(option,sim_no)
 if not os.path.exists(out_unwindowed):
-    if sim_no*100<N_sim:
+    if sim_no*r_sim<N_sim:
 
         t1 = time.time()
         base.n_SHTs_forward, base.n_SHTs_reverse = 0, 0
 
         bl_unwindowed = []
-        for ii in range(100*sim_no,100*sim_no+100):
+        for ii in range(r_sim*sim_no,r_sim*sim_no+r_sim):
             print("Analyzing sim %d of %d"%(ii+1,N_sim))
             if option==1:
                 raw_sim = base.generate_data(seed=ii, add_B=True, b_input=b_input_fac, sum_ells='even')
             else:
                 raw_sim = base.generate_data(seed=ii, add_B=False)
             sim = mask*raw_sim
-            bl_unwindowed.append(bspec.Bl_numerator(sim,include_linear_term=False,verb=(ii==100*sim_no)))
+            bl_unwindowed.append(bspec.Bl_numerator(sim,include_linear_term=False,verb=(ii==r_sim*sim_no)))
             
         bl_unwindowed = np.asarray(bl_unwindowed)
-        print("Unwindowed sim computation complete, averaging %.2f time, %d / %d SHTs"%((time.time()-t1)/100.,base.n_SHTs_forward//100,base.n_SHTs_reverse//100))
+        print("Unwindowed sim computation complete, averaging %.2f time, %d / %d SHTs"%((time.time()-t1)/r_sim,base.n_SHTs_forward//r_sim,base.n_SHTs_reverse//r_sim))
 
         np.save(out_unwindowed,bl_unwindowed)
 
 ### Unwindowed simulations
 out_unwindowed = outdir+'Bl_unwindowed%d_%d.npy'%(option,sim_no)
 if not os.path.exists(out_unwindowed):
-    if sim_no*10<N_sim:
+    if sim_no*r_sim<N_sim:
 
         base.n_SHTs_forward, base.n_SHTs_reverse = 0, 0
         
@@ -245,17 +238,17 @@ if not os.path.exists(out_unwindowed):
         
         t1 = time.time()
         bl_unwindowed = []
-        for ii in range(10*sim_no,10*sim_no+10):
+        for ii in range(r_sim*sim_no,r_sim*sim_no+r_sim):
             print("Analyzing sim %d of %d"%(ii+1,N_sim))
             if option==1:
                 raw_sim = base.generate_data(seed=ii, add_B=True, b_input=b_input_fac, sum_ells='even')
             else:
                 raw_sim = base.generate_data(seed=ii, add_B=False)
             sim = mask*raw_sim
-            bl_unwindowed.append(bspec.Bl_numerator(sim,verb=(ii==10*sim_no)))
+            bl_unwindowed.append(bspec.Bl_numerator(sim,verb=(ii==r_sim*sim_no)))
             
         bl_unwindowed = np.asarray(bl_unwindowed)
-        print("Unwindowed sim computation complete, averaging %.2f time, %d / %d SHTs"%((time.time()-t1)/10.,base.n_SHTs_forward//10,base.n_SHTs_reverse//10))
+        print("Unwindowed sim computation complete, averaging %.2f time, %d / %d SHTs"%((time.time()-t1)/r_sim,base.n_SHTs_forward//r_sim,base.n_SHTs_reverse//r_sim))
 
         np.save(out_unwindowed,bl_unwindowed)
 

@@ -1,0 +1,1 @@
+scontrol: error: NodeNames=worker3241 CPUs=20 match no Sockets, Sockets*CoresPerSocket or Sockets*CoresPerSocket*ThreadsPerCore. Resetting CPUs.

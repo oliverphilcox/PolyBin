@@ -41,7 +41,7 @@ class PolyBin():
                 self.beam = [beam[0],beam[1],beam[1]]
             else:
                 assert (len(beam)==1 or len(beam)==len(Cl['TT'])), "Beam must contain the same ells as Cl"
-                self.beam = [np.asarray(beam)]
+                self.beam = np.asarray(beam).reshape(1,-1)
                 
         # Define indices for T, E, B and their parities
         self.indices = {'T':0,'E':1,'B':2}

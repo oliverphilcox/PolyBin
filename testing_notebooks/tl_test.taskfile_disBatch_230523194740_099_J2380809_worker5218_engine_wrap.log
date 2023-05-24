@@ -1,0 +1,4 @@
+srun: error: NodeNames=worker3241 CPUs=20 match no Sockets, Sockets*CoresPerSocket or Sockets*CoresPerSocket*ThreadsPerCore. Resetting CPUs.
+srun: Job step aborted: Waiting up to 62 seconds for job step to finish.
+slurmstepd: error: *** STEP 2380809.10 ON worker5218 CANCELLED AT 2023-05-23T20:10:43 ***
+slurmstepd: error: Detected 13 oom-kill event(s) in StepId=2380809.10. Some of your processes may have been killed by the cgroup out-of-memory handler.

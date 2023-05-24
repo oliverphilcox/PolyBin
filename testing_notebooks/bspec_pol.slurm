@@ -5,7 +5,7 @@
 #SBATCH --mail-user=ophilcox@princeton.edu
 #SBATCH --ntasks=1
 #SBATCH --time=95:58:59
-#SBATCH --cpus-per-task=40
+#SBATCH --cpus-per-task=4
 #SBATCH -N 1
 #SBATCH -p cca
 #SBATCH --array=0-100
@@ -13,6 +13,7 @@
 
 # Load modules
 module load modules/2.1 openmpi python-mpi intel-mkl cfitsio
+module add disBatch
 source ~/mpivenv2/bin/activate
 
 cd /mnt/home/ophilcox/PolyBin
