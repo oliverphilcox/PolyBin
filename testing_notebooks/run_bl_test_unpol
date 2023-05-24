@@ -1,0 +1,6 @@
+# Load modules
+module load modules/2.1 openmpi python-mpi intel-mkl cfitsio
+module add disBatch
+source ~/mpivenv2/bin/activate
+
+sbatch -p cca -n 10 -c 8 -t 47:58:59 --job-name bl_unpol --mail-user ophilcox@princeton.edu --mail-type END,FAIL disBatch bl_unpol.taskfile

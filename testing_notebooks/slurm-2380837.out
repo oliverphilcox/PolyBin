@@ -1,2 +1,0 @@
-scontrol: error: NodeNames=worker3241 CPUs=20 match no Sockets, Sockets*CoresPerSocket or Sockets*CoresPerSocket*ThreadsPerCore. Resetting CPUs.
-slurmstepd: error: *** JOB 2380837 ON worker3018 CANCELLED AT 2023-05-24T11:58:10 ***

@@ -385,7 +385,7 @@ class BSpec():
 
                                 # skip bins outside the triangle conditions
                                 if not self._check_bin(bin1,bin2,bin3): continue
-                                
+
                                 # Compute combination of fields
                                 tmp_sum  = p1_H_maps[bin1][u1]*this_p1_H_maps[bin2][u2]*this_m2_H_maps[bin3][u3]
                                 tmp_sum += p1_H_maps[bin2][u2]*this_p1_H_maps[bin3][u3]*this_m2_H_maps[bin1][u1]
@@ -406,7 +406,7 @@ class BSpec():
                                         tmp_sum2 = tmp_sum*1.0j
                                     else:
                                         tmp_sum2 = tmp_sum
-                                    b1_num[chi_index*self.N_b//2+index] = -self.base.A_pix*np.real(np.sum(tmp_sum2))/3./self.sym_factor[index]/self.N_it
+                                    b1_num[chi_index*self.N_b//2+index] -= self.base.A_pix*np.real(np.sum(tmp_sum2))/3./self.sym_factor[index]/self.N_it
                                     chi_index += 1
                                 index += 1
     

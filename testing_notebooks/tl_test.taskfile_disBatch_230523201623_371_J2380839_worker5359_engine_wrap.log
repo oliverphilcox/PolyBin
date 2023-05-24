@@ -1,3 +1,0 @@
-srun: error: NodeNames=worker3241 CPUs=20 match no Sockets, Sockets*CoresPerSocket or Sockets*CoresPerSocket*ThreadsPerCore. Resetting CPUs.
-slurmstepd: error: Detected 3 oom-kill event(s) in StepId=2380839.0. Some of your processes may have been killed by the cgroup out-of-memory handler.
-srun: error: worker5359: tasks 1-5: Out Of Memory
