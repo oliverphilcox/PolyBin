@@ -12,6 +12,7 @@ polybin/*old*
 planck
 planck/*
 planck_public/*setup*
+planck_public/*pol*
 planck_trispectrum/*
 planck_trispectrum
 models/*
