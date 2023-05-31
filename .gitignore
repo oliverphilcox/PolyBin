@@ -13,6 +13,7 @@ planck
 planck/*
 planck_public/*setup*
 planck_public/*pol*
+planck_public/*pol.ipynb
 planck_trispectrum/*
 planck_trispectrum
 models/*
