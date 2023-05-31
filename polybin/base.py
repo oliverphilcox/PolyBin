@@ -181,7 +181,7 @@ class PolyBin():
         
         The inputs are [(+s)M(n), (-s)M(n)] and the outputs are [(+s)M_lm, (-s)M_lm]
         """
-        assert spin>=1, "Spin must be positive!"
+        assert spin>0, "Spin must be positive!"
         assert type(spin)==int, "Spin must be an integer!"
         self.n_SHTs_forward += 1
         
@@ -205,7 +205,7 @@ class PolyBin():
         
         The inputs are [(+s)M_lm, (-s)M_lm] and the outputs are [(+s)M(n), (-s)M(n)]
         """
-        assert spin>=1, "Spin must be positive!"
+        assert spin>0, "Spin must be positive!"
         assert type(spin)==int, "Spin must be an integer!"
         
         self.n_SHTs_reverse += 1
@@ -233,7 +233,7 @@ class PolyBin():
             return [self.to_map_spin(a_lm,(-1.)**spin*a_lm,int(abs(spin)))[0] for a_lm in a_lms]
         if spin<0:
             return [self.to_map_spin((-1.)**spin*a_lm,a_lm,int(abs(spin)))[1] for a_lm in a_lms]
-    
+        
     def safe_divide(self, x, y):
         """Function to divide maps without zero errors."""
         out = np.zeros_like(x)

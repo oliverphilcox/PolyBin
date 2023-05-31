@@ -564,7 +564,7 @@ class BSpec():
             return Q_maps            
 
         # Compute Q maps
-        if verb: print("\n# Computing Q3 map for S^-1 weighting")
+        if verb: print("\n# Computing Q3 map for S^-1 weighting (map 1)")
         Q3_Sinv12 = [compute_Q3(a_map, 'Sinv') for a_map in a_maps]
         if verb: print("\n# Computing Q3 map for A^-1 weighting")
         Q3_Ainv12 = [compute_Q3(a_map, 'Ainv') for a_map in a_maps]

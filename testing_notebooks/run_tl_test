@@ -3,4 +3,4 @@ module load modules/2.1 openmpi python-mpi intel-mkl cfitsio
 module add disBatch
 source ~/mpivenv2/bin/activate
 
-sbatch -p cca -n 50 -c 20 -t 95:58:59 --job-name tl_test --mail-user ophilcox@princeton.edu --mail-type END,FAIL disBatch tl_test.taskfile
+sbatch -p cca -n 50 -c 20 -t 47:58:59 --job-name tl_test --mail-user ophilcox@princeton.edu --mail-type END,FAIL disBatch tl_test.taskfile

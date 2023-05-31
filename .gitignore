@@ -25,3 +25,5 @@ old/
 old/*
 *__pycache__*
 README-tmp.md
+testing_notebooks/*
+Tutorial-*.ipynb

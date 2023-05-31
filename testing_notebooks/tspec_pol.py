@@ -9,8 +9,8 @@ from scipy.interpolate import InterpolatedUnivariateSpline
 if len(sys.argv)!=2:
 #    raise Exception("No option or sim-no input supplied!")
     raise Exception("No index supplied!")
-option = int(sys.argv[1])//10+1
-sim_no = int(sys.argv[1])%10
+option = int(sys.argv[1])//25+1
+sim_no = int(sys.argv[1])%25+50
 print("Option: %d, Sim-no: %d"%(option,sim_no))
 
 # HEALPix settings

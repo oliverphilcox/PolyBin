@@ -5,7 +5,6 @@ import numpy as np
 import multiprocessing as mp
 import tqdm
 from scipy.interpolate import InterpolatedUnivariateSpline
-import pywigxjpf as wig
 
 class BSpec():
     """Bispectrum estimation class. This takes the binning strategy as input and a base class. 
@@ -161,7 +160,7 @@ class BSpec():
         
         This function is used in computation of the bispectrum Fisher matrix.
         """
-        assert spin>0
+        assert spin>=0
         if self.ones_mask:
             H_plus = [self.base.compute_spin_transform_map(a_lm*self.ell_bins[bin1]*self.beam_lm, spin) for bin1 in range(self.Nl_squeeze)]
         else:
@@ -209,8 +208,8 @@ class BSpec():
             Wh_alpha_lm = self.base.to_lm(self.mask*self.applySinv(sim,input_type=input_type))
 
         # Compute (+1)H and (-2)H maps
-        p1_H_maps = [self.base.compute_spin_transform_map(self.ell_bins[bin1]*self.beam_lm*Wh_alpha_lm.conj(),1) for bin1 in range(self.Nl_squeeze)]
-        m2_H_maps = [self.base.compute_spin_transform_map(self.ell_bins[bin1]*self.beam_lm*Wh_alpha_lm.conj(),-2) for bin1 in range(self.Nl_squeeze)]
+        p1_H_maps = [self.base.compute_spin_transform_map(self.ell_bins[bin1]*self.beam_lm*Wh_alpha_lm.conj(),0) for bin1 in range(self.Nl_squeeze)]
+        m2_H_maps = [self.base.compute_spin_transform_map(self.ell_bins[bin1]*self.beam_lm*Wh_alpha_lm.conj(),0) for bin1 in range(self.Nl_squeeze)]
         
         return p1_H_maps, m2_H_maps
 
@@ -321,8 +320,8 @@ class BSpec():
         
         # Compute (+1)H and (-2)H maps
         if verb: print("Computing H maps")
-        p1_H_maps = [self.base.compute_spin_transform_map(self.ell_bins[bin1]*self.beam_lm*Wh_data_lm.conj(),1) for bin1 in range(self.Nl_squeeze)]
-        m2_H_maps = [self.base.compute_spin_transform_map(self.ell_bins[bin1]*self.beam_lm*Wh_data_lm.conj(),-2) for bin1 in range(self.Nl_squeeze)]
+        p1_H_maps = [self.base.compute_spin_transform_map(self.ell_bins[bin1]*self.beam_lm*Wh_data_lm.conj(),0) for bin1 in range(self.Nl_squeeze)]
+        m2_H_maps = [self.base.compute_spin_transform_map(self.ell_bins[bin1]*self.beam_lm*Wh_data_lm.conj(),0) for bin1 in range(self.Nl_squeeze)]
 
         # Compute b_3 part of cubic estimator
         b3_num = np.zeros(self.N_b)
@@ -457,8 +456,8 @@ class BSpec():
 
             # Compute (+-1)H maps and (+-2)H maps
             if verb: print("Creating H maps")
-            H_pm2_Uinv_maps = self._compute_H_pm(WUinv_a_lm, 2)
-            H_pm1_Uinv_maps = self._compute_H_pm(WUinv_a_lm, 1)
+            H_pm2_Uinv_maps = self._compute_H_pm(WUinv_a_lm, 0)
+            H_pm1_Uinv_maps = self._compute_H_pm(WUinv_a_lm, 0)
 
             # Now assemble and return Q3 maps
             # Define arrays
@@ -510,12 +509,12 @@ class BSpec():
                             H_m2_2 = H_pm2_Uinv_maps[1][bin2][u2]
 
                             # Compute forward harmonic transforms (for both odd and even pieces simultaneously)
-                            HH12 = self.base.to_lm_spin(H_p1_1*H_p1_2,H_m1_1*H_m1_2,2)[::-1].conj()
+                            HH12 = self.base.to_lm_spin(H_p1_1*H_p1_2,H_m1_1*H_m1_2,0)[::-1].conj()
                             if bin1==bin2 and u1==u2:
-                                HH12 -= 2*np.asarray([[1],[-1]])*self.base.to_lm_spin(H_m1_1*H_p2_2,-H_p1_1*H_m2_2,1).conj()
+                                HH12 -= 2*np.asarray([[1],[-1]])*self.base.to_lm_spin(H_m1_1*H_p2_2,-H_p1_1*H_m2_2,0).conj()
                             else:
-                                HH12 -= np.asarray([[1],[-1]])*self.base.to_lm_spin(H_m1_1*H_p2_2,-H_p1_1*H_m2_2,1).conj()
-                                HH12 -= np.asarray([[1],[-1]])*self.base.to_lm_spin(H_m1_2*H_p2_1,-H_p1_2*H_m2_1,1).conj()
+                                HH12 -= np.asarray([[1],[-1]])*self.base.to_lm_spin(H_m1_1*H_p2_2,-H_p1_1*H_m2_2,0).conj()
+                                HH12 -= np.asarray([[1],[-1]])*self.base.to_lm_spin(H_m1_2*H_p2_1,-H_p1_2*H_m2_1,0).conj()
                             
                             def add_Q3_element(u3_index, bin3_index, these_ind):
                                 # Iterate over these elements and add to the output arrays
@@ -564,7 +563,7 @@ class BSpec():
             return Q_maps            
 
         # Compute Q maps
-        if verb: print("\n# Computing Q3 map for S^-1 weighting")
+        if verb: print("\n# Computing Q3 map for S^-1 weighting (map 1)")
         Q3_Sinv12 = [compute_Q3(a_map, 'Sinv') for a_map in a_maps]
         if verb: print("\n# Computing Q3 map for A^-1 weighting")
         Q3_Ainv12 = [compute_Q3(a_map, 'Ainv') for a_map in a_maps]
@@ -666,8 +665,8 @@ class BSpec():
 
         # Compute (+1)H and (-2)H maps
         if verb: print("Computing H maps")
-        p1_H_maps = [self.base.compute_spin_transform_map(self.ell_bins[bin1]*self.beam_lm*Cinv_data_lm.conj(),1) for bin1 in range(self.Nl_squeeze)]
-        m2_H_maps = [self.base.compute_spin_transform_map(self.ell_bins[bin1]*self.beam_lm*Cinv_data_lm.conj(),-2) for bin1 in range(self.Nl_squeeze)]
+        p1_H_maps = [self.base.compute_spin_transform_map(self.ell_bins[bin1]*self.beam_lm*Cinv_data_lm.conj(),0) for bin1 in range(self.Nl_squeeze)]
+        m2_H_maps = [self.base.compute_spin_transform_map(self.ell_bins[bin1]*self.beam_lm*Cinv_data_lm.conj(),0) for bin1 in range(self.Nl_squeeze)]
 
         # Define output array
         b_num_ideal = np.zeros(self.N_b)
@@ -793,7 +792,7 @@ class BSpec():
                                                             inv_cov3 += Cinv_bin(0,2,l1)*Cinv_bin(1,1,l2)*Cinv_bin(2,0,l3)
                                                             if inv_cov3==0: continue
 
-                                                            tj = self.base.tj_sym(l1,l2,l3)
+                                                            tj = self.base.tj0(l1,l2,l3)#self.base.tj_sym(l1,l2,l3)
                                                             if tj==0: continue
 
                                                             # note absorbing factor of chi*p_u here 
