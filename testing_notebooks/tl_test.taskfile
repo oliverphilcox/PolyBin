@@ -1,3 +1,0 @@
-#DISBATCH PREFIX ( unset SLURM_JOBID; cd /mnt/home/ophilcox/PolyBin/testing_notebooks ;
-#DISBATCH SUFFIX  ) &> /mnt/home/ophilcox/out/polybin_tl_${DISBATCH_TASKID}.log
-#DISBATCH REPEAT 50 python -u tspec_pol.py ${DISBATCH_TASKID}
