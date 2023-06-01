@@ -10,7 +10,7 @@ PolyBin contains the following modules:
 
 For usage details, see the [Tutorial](Tutorial.ipynb). 
 
-In the [planck](planck_public/) directory, we include measurements and analysis of the Planck parity-odd temperature trispectrum, as in [Philcox 2023b](https://arxiv.org/abs/2303.12106). The [scalar](https://github.com/oliverphilcox/PolyBin/scalar) branch contains legacy scalar-only code from the [Philcox 2023a](https://arxiv.org/abs/2303.08828) paper (without a number of optimizations).
+In the [planck](planck_public/) directory, we include measurements and analysis of the Planck parity-odd temperature trispectrum, as in [Philcox 2023b](https://arxiv.org/abs/2303.12106). The [scalar](https://github.com/oliverphilcox/PolyBin/tree/scalar) branch contains legacy scalar-only code from the [Philcox 2023a](https://arxiv.org/abs/2303.08828) paper (without a number of optimizations).
 
 ### Authors
 - [Oliver Philcox](mailto:ohep2@cantab.ac.uk) (Columbia / Simons Foundation)
