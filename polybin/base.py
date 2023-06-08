@@ -306,10 +306,10 @@ class PolyBin():
         
         # Apply correction to a_lm
         output_lm = [initial_lm[i] + 1./3.*grad_lm[i] for i in range(len(Cinv_lm))]
-        output_map = self.to_map(output_lm)
-
+        
         # Optionally remove mean of map
         if remove_mean:
+            output_map = self.to_map(output_lm)
             
             # Compute mean of synthetic maps numerically
             if not hasattr(self, 'map_offset') or (hasattr(self,'map_offset') and self.saved_spec!=[Cl_input,b_input]):
@@ -322,7 +322,9 @@ class PolyBin():
             # Remove mean
             output_map -= self.map_offset
         
-        return np.asarray(output_map)
+        if output_type=='map' and remove_mean: return output_map
+        if output_type=='map': return self.to_map(output_lm)
+        else: return output_lm
     
     def applyAinv(self, input_map, input_type='map', output_type='map'):
         """Apply the exact inverse weighting A^{-1} to a map. This assumes a diagonal-in-ell C_l^{XY} weighting, as produced by generate_data.
