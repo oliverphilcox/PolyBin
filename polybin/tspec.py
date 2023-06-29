@@ -756,7 +756,7 @@ class TSpec():
                                                 tmp_Q_p = 1.0j*(this_Q[:,0]+p_u*this_Q[:,1]) # chi = 1
                                                 tmp_Q_m = this_Q[:,0]-p_u*this_Q[:,1] # chi = -1
 
-                                            if self.parity=='even' or 'both':
+                                            if self.parity in ['even','both']:
                                                 tmp_Q[ii] += tmp_Q_p
                                             if self.parity=='both':
                                                 tmp_Q[ii+self.N_t//2] += tmp_Q_m
