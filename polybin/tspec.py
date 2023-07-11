@@ -896,26 +896,79 @@ class TSpec():
         Cinv_l_empirical = []
         for u1 in range(1+2*self.pol):
             Cinv_l_empirical1 = []
-            for u2 in range(u1+1):
+            for u2 in range(1+2*self.pol):
                 Cinv_data_lm_sq = 0.5*(Cinv_data_lm[u1]*np.conj(Cinv_data_lm[u2])+Cinv_data_lm[u2]*np.conj(Cinv_data_lm[u1]))*self.base.m_weight
                 Cinv_l_empirical1.append([np.real(np.sum(Cinv_data_lm_sq[self.base.l_arr==l]*self.beam[u1][l]*self.beam[u2][l])/(2*l+1)) for l in range(np.max(self.l_bins_squeeze))])
             Cinv_l_empirical.append(Cinv_l_empirical1)            
-        
+        Cinv_l_empirical = np.asarray(Cinv_l_empirical)
+
         if verb: print("Assembling 2- and 0-field trispectrum numerator")
-        
-        global _iterator
-        def _iterator(input_index, verb=verb):
+
+        inv_Cl_beam = self.base.inv_Cl_mat[:,:,:]*np.asarray(self.beam)[:,None,:]*np.asarray(self.beam)[None,:,:]
+
+        # First compute all l1,l2,L summations for each bin
+        if verb: print("Computing partial l-summations")
+
+        # Create list of bins
+        bin_list = []
+        for bin1 in range(self.Nl_squeeze):
+            for bin2 in range(bin1,self.Nl_squeeze): # we can reconstruct bin1 > bin2 by symmetry
+                for binL in range(self.NL):
+                    # skip bins outside the triangle conditions
+                    if not self._check_bin(bin1,bin2,binL): continue
+                    bin_list.append([bin1,bin2,binL])
+
+        global _compute_binned_sum
+        def _compute_binned_sum(bin_index):
+            bin1,bin2,binL = bin_list[bin_index]
+
+            # Sum over ells for two- and zero-point terms
+            value2, value0 = 0., 0.
+            for l1 in range(self.l_bins[bin1],self.l_bins[bin1+1]):
+                for l2 in range(self.l_bins_squeeze[bin2],self.l_bins_squeeze[bin2+1]):
+
+                    pref_l12_t2 = (2*l1+1.)*(2*l2+1.)*(-1.)**(l1+l2)/(4.*np.pi)*(Cinv_l_empirical[:,:,None,None,l2]*inv_Cl_beam[None,None,:,:,l1]+Cinv_l_empirical[None,None,:,:,l1]*inv_Cl_beam[:,:,None,None,l2])
+                    pref_l12_t0 = (2*l1+1.)*(2*l2+1.)*(-1.)**(l1+l2)/(4.*np.pi)*inv_Cl_beam[:,:,None,None,l1]*inv_Cl_beam[None,None,:,:,l2]
+
+                    for L in range(max(self.L_bins[binL],abs(l1-l2)),min(self.L_bins[binL+1],l1+l2+1)):
+
+                        # define 3j symbols with spin (-1, -1, 2)
+                        tjs = (2*L+1.)*self.threej(l1,l2,L)**2.*(-1)**L
+                        if tjs==0: continue
+
+                        # Add to sums
+                        value2 -= tjs*pref_l12_t2
+                        value0 += tjs*pref_l12_t0
+
+            return value0, value2
+
+        p = mp.Pool(N_cpus)
+        output = list(tqdm.tqdm(p.imap(_compute_binned_sum,np.arange(len(bin_list))),total=len(bin_list)))
+
+        # Create output dictionary
+        t0_sums = {}
+        t2_sums = {}
+        for bin_index in range(len(bin_list)):
+            bin1,bin2,binL = bin_list[bin_index]
+            t0_sums[bin1,bin2,binL] = output[bin_index][0]
+            t2_sums[bin1,bin2,binL] = output[bin_index][1]
+            # Add symmetries
+            t0_sums[bin2,bin1,binL] = np.swapaxes(np.swapaxes(output[bin_index][0],0,2),1,3)
+            t2_sums[bin2,bin1,binL] = np.swapaxes(np.swapaxes(output[bin_index][1],0,2),1,3)
+
+        global _assemble_output
+        def _assemble_output(input_index, verb=verb):
 
             # Define 2- and 0-field arrays
             t2_num_ideal = np.zeros(self.N_t)
             t0_num_ideal = np.zeros(self.N_t)
-        
+
             # Iterate over fields
             index = 0
             for u in self.fields:
                 u1, u2, u3, u4 = [self.base.indices[u[i]] for i in range(4)]
                 p_u = np.product([self.base.parities[u[i]] for i in range(4)])
-                
+
                 # Iterate over bins satisfying relevant conditions
                 for bin1 in range(self.Nl):
                     for bin2 in range(self.Nl_squeeze):
@@ -948,30 +1001,17 @@ class TSpec():
                                     if p_u==1 and self.parity=='odd':
                                         index += 1
                                         continue
-                                    
-                                    # Sum over ells for two- and zero-point terms
-                                    value2, value0 = 0., 0.
-                                    for l1 in range(self.l_bins[bin1],self.l_bins[bin1+1]):
-                                        for l2 in range(self.l_bins_squeeze[bin2],self.l_bins_squeeze[bin2+1]):
-                                            for L in range(max(self.L_bins[binL],abs(l1-l2)),min(self.L_bins[binL+1],l1+l2+1)):
 
-                                                # define 3j symbols with spin (-1, -1, 2)
-                                                tjs = self.threej(l1,l2,L)**2.
-                                                if tjs==0: continue
-                                                pref = (2*L+1.)*(2*l1+1.)*(2*l2+1.)/(4.*np.pi)*tjs*(-1.)**(l1+l2+L)
-                                                
-                                                # First permutation
-                                                if (bin1==bin3)*(bin2==bin4):
-                                                    value2 -= pref*Cinv_l_empirical[max([u2,u4])][min([u2,u4])][l2]*self.base.inv_Cl_mat[u3,u1][l1]*self.beam[u1][l1]*self.beam[u3][l1]
-                                                    value2 -= pref*Cinv_l_empirical[max([u1,u3])][min([u1,u3])][l1]*self.base.inv_Cl_mat[u4,u2][l2]*self.beam[u2][l2]*self.beam[u4][l2]
-                                                    value0 += pref*self.base.inv_Cl_mat[u3,u1][l1]*self.base.inv_Cl_mat[u4,u2][l2]*self.beam[u1][l1]*self.beam[u3][l1]*self.beam[u2][l2]*self.beam[u4][l2]
-                                                
-                                                # Second permutation
-                                                if (bin1==bin4)*(bin2==bin3):                                                    
-                                                    value2 -= pref*Cinv_l_empirical[max([u2,u3])][min([u2,u3])][l2]*self.base.inv_Cl_mat[u4,u1][l1]*self.beam[u1][l1]*self.beam[u4][l1]
-                                                    value2 -= pref*Cinv_l_empirical[max([u1,u4])][min([u1,u4])][l1]*self.base.inv_Cl_mat[u3,u2][l2]*self.beam[u2][l2]*self.beam[u3][l2]
-                                                    value0 += pref*self.base.inv_Cl_mat[u4,u1][l1]*self.base.inv_Cl_mat[u3,u2][l2]*self.beam[u1][l1]*self.beam[u4][l1]*self.beam[u3][l2]*self.beam[u2][l2]
-                                                
+                                    value0, value2 = 0.,0.
+                                    # First permutation
+                                    if (bin1==bin3)*(bin2==bin4):
+                                        value2 += t2_sums[bin1,bin2,binL][u2,u4,u3,u1]
+                                        value0 += t0_sums[bin1,bin2,binL][u3,u1,u4,u2]
+                                    # Second permutation
+                                    if (bin1==bin4)*(bin2==bin3):
+                                        value2 += t2_sums[bin1,bin2,binL][u2,u3,u4,u1]
+                                        value0 += t0_sums[bin1,bin2,binL][u4,u1,u3,u2]
+
                                     # Add to output arrays, depending on parity
                                     chi_index = 0
                                     for chi in self.chi_arr:
@@ -983,19 +1023,20 @@ class TSpec():
                                         chi_index += 1
 
                                     index += 1
-        
+
             t2 =  t2_num_ideal/np.mean(self.mask**2)/self.sym_factor
             t0 = t0_num_ideal/self.sym_factor
             return t2, t0
 
         # Multiprocess computation
+        if verb: print("Assembling output")
         p = mp.Pool(N_cpus)
         if self.parity=='both':
             n_elem = len(self.sym_factor)//2
         else:
             n_elem  = len(self.sym_factor)
-        t02_num = list(tqdm.tqdm(p.imap_unordered(_iterator, np.arange(n_elem)), total=n_elem))
-        
+        t02_num = list(tqdm.tqdm(p.imap(_assemble_output, np.arange(n_elem)), total=n_elem))
+
         # Reconfigure output
         t2_num = np.asarray([t[0] for t in t02_num]).sum(axis=0)
         t0_num = np.asarray([t[1] for t in t02_num]).sum(axis=0)
