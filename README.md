@@ -28,3 +28,4 @@ In the [planck](planck_public/) directory, we include measurements and analysis 
 **List of papers using Polybin:**
 1. Philcox, O. H. E., "Do the CMB Temperature Fluctuations Conserve Parity?", (2023) ([arXiv](https://arxiv.org/abs/2303.12106))
 2. Philcox, O. H. E., Shiraishi, M., "Testing Parity Symmetry with the Polarized Cosmic Microwave Background", (2023) ([arXiv](http://arxiv.org/abs/2308.03831))
+3. Philcox, O. H. E., Shiraishi, M., "Testing Graviton Parity and Gaussianity with Planck T -, E- and B-mode Bispectra", (2023) ([arXiv](https://arxiv.org/abs/2312.12498))
