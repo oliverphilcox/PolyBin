@@ -2,8 +2,8 @@
 
 # PolySpec
 PolySpec (formerly PolyBin) is a Python code that estimates $N$-point correlation functions for 2D HEALPix maps, optionally with spin (e.g., CMB temperature, polarization, galaxy positions and cosmic shear). There are two main functionalities:
-- `Templates`: This directly estimates the amplitude of inflationary templates in CMB data, such as gNL or tauNL, in addition to late time templates such as CMB lensing. This includes thirteen types of trispectrum estimator (see below), and provides quasi-optimal estimates of the template amplitudes, accounting for arbitrary beams, masks, and filtering. 
-- `Binned Statistics`: This estimates the binned power spectrum, bispectrum and trispectrum of a 2D field, accounting for correlations between bins. For each statistic, two estimators are available: the standard/ideal estimators (i.e. pseudo-Cl), which do not take into account the mask, and window-deconvolved estimators, which do. In the second case, we require computation of a numerical Fisher matrix; this depends on binning and the mask, but does not need to be recomputed for each new simulation. For the bispectrum and trispectrum, we can compute both the *parity-even* and *parity-odd* components, accounting for any leakage between the two.
+- **Templates**: This directly estimates the amplitude of inflationary templates in CMB data, such as gNL or tauNL, in addition to late time templates such as CMB lensing. This includes thirteen types of trispectrum estimator (see below), and provides quasi-optimal estimates of the template amplitudes, accounting for arbitrary beams, masks, and filtering. 
+- **Binned Statistics**: This estimates the binned power spectrum, bispectrum and trispectrum of a 2D field, accounting for correlations between bins. For each statistic, two estimators are available: the standard/ideal estimators (i.e. pseudo-Cl), which do not take into account the mask, and window-deconvolved estimators, which do. In the second case, we require computation of a numerical Fisher matrix; this depends on binning and the mask, but does not need to be recomputed for each new simulation. For the bispectrum and trispectrum, we can compute both the *parity-even* and *parity-odd* components, accounting for any leakage between the two.
 
 PolySpec contains the following main modules:
 - `pspec_bin`: Binned power spectra
@@ -19,7 +19,7 @@ In the templates class, we can estimate the following types of trispectra:
 - `tauNL-heavy`, `tauNL-light`: Cosmological collider signatures from massive spinning particles
 - `lensing`, `point-source`: CMB lensing and point source amplitudes
 
-For details on the binned estimators, see the [Binned Tutorial](Tutorial-Binned.ipynb). For details on the template estimators see the [Template Tutorial](Tutorial-Template.ipynb).
+For details on the binned estimators, see the [Binned Tutorial](Tutorial - Computing Binned Polyspectra.ipynb). For details on the template estimators see the [Template Tutorial](Tutorial - Computing Trispectrum Templates.ipynb).
 
 ### Example Usage
 Below, we demonstrate how to use PolySpec to compute gNL-loc and the lensing amplitude from a dataset. This depends on a number of inputs, which are discussed in the tutorial.
@@ -61,7 +61,7 @@ fish = np.mean([bspec_bin.compute_fisher_contribution(seed) for seed in range(Nf
 bspec_bin.generate_sims(Nnum)
 estimate = np.linalg.inv(fish)@bspec_bin.Bl_numerator(data)
 ```
-Further details can be found in the Tutorials. We additionally provide a sample scripts demonstrating the application of PolySpec to [Planck trispectrum templates](run_planck_local_trispectra.py) and [Planck binned bispectra](run_planck_binned_bispectra.py) in a realistic set-up.
+Further details can be found in the Tutorials. We additionally provide a sample scripts demonstrating the application of PolySpec to [Planck trispectrum templates](run_planck_local_trispectra.py) and [Planck binned bispectra](run_planck_binned_bispectrum.py) in a realistic set-up.
 
 ### Authors
 - [Oliver Philcox](mailto:ohep2@cantab.ac.uk) (Columbia / Stanford / Simons Foundation)
