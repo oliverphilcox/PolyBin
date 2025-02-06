@@ -19,7 +19,7 @@ In the templates class, we can estimate the following types of trispectra:
 - `tauNL-heavy`, `tauNL-light`: Cosmological collider signatures from massive spinning particles
 - `lensing`, `point-source`: CMB lensing and point source amplitudes
 
-For details on the binned estimators, see the [Binned Tutorial](Tutorial - Computing Binned Polyspectra.ipynb). For details on the template estimators see the [Template Tutorial](Tutorial - Computing Trispectrum Templates.ipynb).
+For details on the binned estimators, see the [Binned Tutorial](Tutorial\ -\ Computing\ Binned\ Polyspectra.ipynb). For details on the template estimators see the [Template Tutorial](Tutorial\ -\ Computing\ Trispectrum\ Templates.ipynb).
 
 ### Example Usage
 Below, we demonstrate how to use PolySpec to compute gNL-loc and the lensing amplitude from a dataset. This depends on a number of inputs, which are discussed in the tutorial.
