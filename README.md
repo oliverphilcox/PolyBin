@@ -80,12 +80,12 @@ When using the template estimators, a number of Cython modules must be installed
 ### Code References
 1. Philcox, O. H. E., "Optimal Estimation of the Binned Mask-Free Power Spectrum, Bispectrum, and Trispectrum on the Full Sky: Scalar Edition", (2023) ([arXiv](https://arxiv.org/abs/2303.08828))
 2. Philcox, O. H. E., "Optimal Estimation of the Binned Mask-Free Power Spectrum, Bispectrum, and Trispectrum on the Full Sky: Tensor Edition", (2023) ([arXiv](https://arxiv.org/abs/2306.03915))
-3. Philcox, O. H. E., "Searching for Inflationary Physics with the CMB Trispectrum: Primordial Theory & Optimal Estimators", (2025, to appear)
-4. Philcox, O. H. E., "Searching for Inflationary Physics with the CMB Trispectrum: Code & Validation", (2025, to appear)
+3. Philcox, O. H. E., "Searching for Inflationary Physics with the CMB Trispectrum: 1. Primordial Theory & Optimal Estimators", (2025) ([arXiv](https://arxiv.org/abs/2502.04434))
+4. Philcox, O. H. E., "Searching for Inflationary Physics with the CMB Trispectrum: 2. Code & Validation", (2025, to appear)
 
 ### Applications
 5. Philcox, O. H. E., "Do the CMB Temperature Fluctuations Conserve Parity?", (2023) ([arXiv](https://arxiv.org/abs/2303.12106))
 6. Philcox, O. H. E., Shiraishi, M., "Testing Parity Symmetry with the Polarized Cosmic Microwave Background", (2023) ([arXiv](https://arxiv.org/abs/2308.03831))
 7. Philcox, O. H. E., Shiraishi, M., "Testing graviton parity and Gaussianity with Planck T-, E-, and B-mode bispectra", (2024) ([arXiv](https://arxiv.org/abs/2312.12498))
 8. Philcox, O. H. E., Shiraishi, M., "Non-Gaussianity Beyond the Scalar Sector: A Search for Tensor and Mixed Tensor-Scalar Bispectra with Planck Data", (2024) ([arXiv](https://arxiv.org/abs/2409.10595))
-9. Philcox, O. H. E., "Searching for Inflationary Physics with the CMB Trispectrum: Constraints from Planck", (2025, to appear)
+9. Philcox, O. H. E., "Searching for Inflationary Physics with the CMB Trispectrum: 3. Constraints from Planck", (2025, to appear)
