@@ -88,4 +88,4 @@ When using the template estimators, a number of Cython modules must be installed
 6. Philcox, O. H. E., Shiraishi, M., "Testing Parity Symmetry with the Polarized Cosmic Microwave Background", (2023) ([arXiv](https://arxiv.org/abs/2308.03831))
 7. Philcox, O. H. E., Shiraishi, M., "Testing graviton parity and Gaussianity with Planck T-, E-, and B-mode bispectra", (2024) ([arXiv](https://arxiv.org/abs/2312.12498))
 8. Philcox, O. H. E., Shiraishi, M., "Non-Gaussianity Beyond the Scalar Sector: A Search for Tensor and Mixed Tensor-Scalar Bispectra with Planck Data", (2024) ([arXiv](https://arxiv.org/abs/2409.10595))
-9. Philcox, O. H. E., "Searching for Inflationary Physics with the CMB Trispectrum: 3. Constraints from Planck", (2025, to appear)
+9. Philcox, O. H. E., "Searching for Inflationary Physics with the CMB Trispectrum: 3. Constraints from Planck", (2025) ([arXiv](https://arxiv.org/abs/2502.06931))
