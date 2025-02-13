@@ -11,9 +11,9 @@ class PolySpec():
     
     Inputs:
     - Nside: HEALPix Nside
-    - Cl_tot: Fiducial power spectra (including beam, pixellation, and noise). This is used for creating synthetic maps for the optimal estimators, and, optionally, generating GRFs to test on.
+    - Cl_tot: Dictionary of fiducial power spectra (including beam, pixellation, and noise). This is used for creating synthetic maps for the optimal estimators, and, optionally, generating GRFs to test on.
     - beam: Beam present in the signal maps (including any pixel window). This will be set to unity if unspecified, else deconvolved out the signal. If polarization is set, this contains two components: (Temperature-Beam, Polarization-Beam)
-    - pol: Whether to include spin-2 fields in the computations. If true, Cl_tot should be a list of six spectra: [ClTT, ClTE, ClTB, ClEE, ClEB, ClBB]. If false, Cl_tot contains only ClTT.
+    - pol: Whether to include spin-2 fields in the computations. If true, Cl_tot should contain six spectra: ClTT, ClTE, ClTB, ClEE, ClEB, ClBB. If false, Cl_tot contains only ClTT.
     - backend: Which backend to use to compute spherical harmonic transforms. Options: "healpix" [requires healpy] or "ducc" [requires ducc0].   
     - nthreads: How many CPU threads to use to parallelize computations. This defaults to the maximum number available.
     """
