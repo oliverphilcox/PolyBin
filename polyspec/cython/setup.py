@@ -3,7 +3,7 @@ from Cython.Build import cythonize
 import numpy
 
 # Compile pyx files requiring WignerSymbols and C++
-modules = ['tauNL_utils']
+modules = ['tauNL_utils','fNL_utils']
 for module in modules:
     ext_modules = [
         Extension(

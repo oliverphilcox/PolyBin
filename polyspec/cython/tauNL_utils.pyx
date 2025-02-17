@@ -4,8 +4,7 @@ from __future__ import print_function
 import numpy as np
 cimport numpy as np
 cimport cython
-import time
-from libc.math cimport abs, M_PI, sqrt, exp, pow as dpow
+from libc.math cimport abs, M_PI, sqrt
 from cython.parallel import prange
 
 cdef extern from "<complex.h>" namespace "std" nogil:
@@ -218,7 +217,7 @@ cdef class tauNL_utils:
     @cython.wraparound(False)
     @cython.cdivision(True)
     cpdef np.ndarray[np.complex128_t,ndim=2] radial_sum(self, complex[:,::1] lm_map, double[:] r_weights, double[:,:,::1] flXs):
-        """Multiply two maps together to compute A*B in parallel, where A is complex. """
+        """Compute [Sum_r weight(r) f^X_l(r) A^X_lm(r)], where A is complex. """
         cdef int nlm = lm_map.shape[1], nr = lm_map.shape[0], npol = flXs.shape[1]
         cdef int ilm, ir, ipol, l
         cdef complex tmp_out
@@ -238,7 +237,7 @@ cdef class tauNL_utils:
     @cython.wraparound(False)
     @cython.cdivision(True)
     cpdef np.ndarray[np.complex128_t,ndim=2] radial_sum_spin1(self, complex[:,:,::1] lm_map, double[:] r_weights, double[:,:,::1] flXs):
-        """Multiply two maps together to compute A*B in parallel, where A is complex. """
+        """Compute [Sum_r weight(r) f^X_l(r) (A^X_lm(r)-B^X_lm(r)], where A has two complex components. """
         cdef int nlm = lm_map.shape[2], nr = lm_map.shape[1], npol = flXs.shape[1]
         cdef int ilm, ir, ipol, l
         cdef complex tmp_out

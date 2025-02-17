@@ -31,7 +31,7 @@ base = ps.PolySpec(Nside, fiducial_Cl_tot, beam, backend="ducc")
 
 # Load the trispectrum template class, specifying the templates to analyze
 tspec = ps.TSpecTemplate(base, smooth_mask, applySinv, ["gNL-loc","lensing"], 
-                         k_array, transfer_array, lmin=lmin, lmax=lmax, Lmin=Lmin, Lmax=Lmax,
+                         lmin, lmax, k_array, transfer_array, Lmin, Lmax,
                          C_phi=Cl_phi, C_lens_weight = Cl_lensed)
 
 # Perform optimization to compute the radial integration points

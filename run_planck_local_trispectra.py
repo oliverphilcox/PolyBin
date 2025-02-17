@@ -141,7 +141,7 @@ with np.load(transfer_file,allow_pickle=True) as transfer_inp:
         TlT_k_arr = np.vstack([[np.zeros_like(k_arr) for _ in range(2)],transfer_inp['transfer'][0,:3*Nside]*pars.TCMB])
         Tl_arr = [TlT_k_arr]
 
-    # LOad lensed power spectra
+    # Load lensed power spectra
     clTT, clEE, clBB, clTE = transfer_inp['cls'].flat[0]['lensed_scalar'].T
     clPP = transfer_inp['cls'].flat[0]['lens_potential'][:,0]
 
@@ -282,7 +282,7 @@ if not os.path.exists(weightfile):
     
     # Load PolySpec template class
     tspec = ps.TSpecTemplate(base, smooth_mask, applySinv, templates,
-                    k_arr, Tl_arr, lmin, lmax, Lmin=Lmin, Lmax=Lmax, Lmin_lens=Lmin_lens, Lmax_lens=Lmax_lens, 
+                    lmin, lmax, k_arr=k_arr, Tl_arr=Tl_arr, Lmin=Lmin, Lmax=Lmax, Lmin_lens=Lmin_lens, Lmax_lens=Lmax_lens, 
                     k_pivot=pars.InitPower.pivot_scalar, C_phi = clPP, C_lens_weight = cl_dict, 
                     ns = pars.InitPower.ns, As = pars.InitPower.As)
     

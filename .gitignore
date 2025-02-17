@@ -9,3 +9,5 @@ polyspec/cython/build
 polyspec/cython/build/*
 .ipynb_checkpoints
 .ipynb_checkpoints/*
+scripts/
+scripts/*

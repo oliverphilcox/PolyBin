@@ -285,4 +285,3 @@ class PSpecBin():
             index += self.Nl
 
         return Cl_dict
-       

@@ -1,16 +1,12 @@
-### Code for ideal and unwindowed binned/template polyspectrum estimation on the full-sky. Author: Oliver Philcox (2022-2025)
+### Code for binned/template polyspectrum estimation on the full-sky. Author: Oliver Philcox (2022-2025)
 ## This module contains the trispectrum template estimation code
 
 import numpy as np
 import time
-import multiprocessing as mp
-import tqdm
-from scipy.interpolate import interp1d
-import pywigxjpf as wig
-from scipy.integrate import trapezoid
-from scipy.special import loggamma, gamma, hyp2f1, spherical_jn, p_roots, lpmn
+from scipy.special import gamma, p_roots, lpmn
 from scipy.optimize import minimize
 from scipy.linalg import pinv
+import pywigxjpf as wig
 from .cython.k_integrals import *
 from .cython.tauNL_utils import *
 from .cython.ideal_fisher import *
@@ -24,8 +20,8 @@ class TSpecTemplate():
     - base: PolySpec class
     - mask: HEALPix mask applied to data. We can optionally specify a vector of three masks for [T, Q, U].
     - applySinv: function which returns S^-1 ~ P^dag Cov^{-1} in harmonic space, when applied to a given input map, where P = Mask * Beam.
-    - templates: types of templates to compute e.g. [gNL-loc, tauNL-loc]
-    - k_arr, Tl_arr: k-array, plus T- and (optionally) E-mode transfer functions for all ell
+    - templates: types of templates to compute e.g. [gNL-loc, tauNL-loc, lensing]
+    - k_arr, Tl_arr: k-array, plus T- and (optionally) E-mode transfer functions for all ell. Required for all primordial templates.
     - lmin, lmax: minimum/maximum ell (inclusive)
     - Lmin, Lmax: minimum/maximum internal L (inclusive)
     - Lmin_lens, Lmax_lens: minimum/maximum internal L for lensing (inclusive)
@@ -34,14 +30,15 @@ class TSpecTemplate():
     - rtau_values, rtau_weights: list of (r,tau) sampling points for 2-dimensional EFTI integrals
     - weights: weights. These should be a dictionary for each template in question. For integrals involving tau or kappa, these should be two-dimensional.
     - C_phi: lensing power spectrum [C^phiphi_0, C^phiphi_1, etc.]. Required if 'lensing' is in templates.
+    - C_Tphi: cross spectrum of temperature and lensing  [C^Tphi_0, C^Tphi_1, etc.]. Required if 'isw-lensing' is in templates.
     - C_lens_weight: dictionary of lensed power spectra (TT, TE, etc.). Required if 'lensing' is in templates.
     - K_coll, k_coll: cut-off scale for collider templates (restricting to k > k_coll, K < K_coll (default: 0.01, 0.01).
     - r_star, r_hor: Comoving distance to last-scattering and the horizon (default: Planck 2018 values).
     """
-    def __init__(self, base, mask, applySinv, templates, k_arr, Tl_arr, lmin, lmax,  
+    def __init__(self, base, mask, applySinv, templates, lmin, lmax, k_arr=[], Tl_arr=[], 
                  Lmin=None, Lmax=None, Lmin_lens=None, Lmax_lens=None, ns=0.96, As=2.1e-9, k_pivot=0.05, 
                  r_values = [], r_weights = {}, rtau_values = [], rtau_weights = {}, 
-                 C_phi=[], C_lens_weight = {}, K_coll=0.1, k_coll=0.1, r_star=None, r_hor=None):
+                 C_phi=[], C_Tphi=[], C_lens_weight = {}, K_coll=0.1, k_coll=0.1, r_star=None, r_hor=None):
         # Read in attributes
         self.base = base
         self.mask = mask
@@ -93,7 +90,7 @@ class TSpecTemplate():
         assert self.Lmax<=base.lmax, "Maximum L can't be larger than HEALPix resolution"
         
         # Check lensing L ranges
-        if 'lensing' in self.templates:
+        if 'lensing' in self.templates or 'isw-lensing' in self.templates:
             if Lmin_lens==None:
                 if np.any(['gNL' in t for t in self.templates]):
                     self.Lmin_lens = 1
@@ -120,7 +117,7 @@ class TSpecTemplate():
         self.lfilt = (self.base.l_arr>=self.lmin)&(self.base.l_arr<=self.lmax)
         self.Lfilt = (self.base.l_arr>=self.Lmin)&(self.base.l_arr<=self.Lmax)
         self.ls, self.ms = self.base.l_arr[self.lfilt], self.base.m_arr[self.lfilt]
-        if 'lensing' in self.templates:
+        if 'lensing' in self.templates or 'isw-lensing' in self.templates:
             self.Lfilt_lens = (self.base.l_arr>=self.Lmin_lens)&(self.base.l_arr<=self.Lmax_lens)
         self.m_weight = np.asarray(self.base.m_weight[self.lfilt],order='C')
         self.Cinv = np.asarray(self.base.inv_Cl_tot_lm_mat[:,:,self.lfilt],order='C')
@@ -132,17 +129,17 @@ class TSpecTemplate():
         print("l-range: %s"%[self.lmin,self.lmax])
         if np.any(['tauNL' in template for template in templates]):
             print("L-range: %s"%[self.Lmin,self.Lmax])
-        if 'lensing' in self.templates:
+        if 'lensing' in self.templates or 'isw-lensing' in self.templates:
             print("Lensing L-range: %s"%[self.Lmin_lens,self.Lmax_lens])
         
-        # Check correct polarizations are being used
+        # Print polarizations
         if self.pol:
             print("Polarizations: ['T', 'E']")
         else:
             print("Polarizations: ['T']")
         
         # Configure template parameters and limits
-        self._configure_templates(templates, C_phi, C_lens_weight)
+        self._configure_templates(templates, C_phi, C_Tphi, C_lens_weight)
     
         # Check mask properties
         if not type(mask)==float or type(mask)==int:
@@ -240,14 +237,14 @@ class TSpecTemplate():
             self._prepare_templates(False, self.ints_2d, False)
         
     ### UTILITY FUNCTIONS
-    def _configure_templates(self, templates, C_phi, C_lens_weight):
+    def _configure_templates(self, templates, C_phi, C_Tphi, C_lens_weight):
         """Check input templates and log which quantities to compute."""
         
         # Check correct templates are being used and print them
         self.all_templates_1d = ['gNL-loc','gNL-con','tauNL-loc','tauNL-direc','tauNL-even','tauNL-odd']
         self.all_templates_2d = ['gNL-dotdot','gNL-dotdel','gNL-deldel']
         self.all_templates_coll = ['tauNL-light','tauNL-heavy']
-        self.all_templates = self.all_templates_1d+self.all_templates_2d+self.all_templates_coll+['lensing','point-source']
+        self.all_templates = self.all_templates_1d+self.all_templates_2d+self.all_templates_coll+['lensing','isw-lensing','point-source']
         ii = 0
         for t in templates:
             ii += 1
@@ -299,6 +296,44 @@ class TSpecTemplate():
             self.to_compute.append(['q'])
             self.n1n3n += [[0,0,0]]
             self.ints_1d = True
+        if 'lensing' in templates:
+            # Check inputs
+            assert len(C_phi)>0, "Must supply lensing power spectrum!"
+            assert len(C_phi)>=self.Lmax_lens+1, "Must specify C^phi-phi(L) up to at least Lmax."
+            if not self.pol:
+                assert 'TT' in C_lens_weight.keys(), "Must specify unlensed TT power spectrum!"
+            else:
+                assert 'TE' in C_lens_weight.keys(), "Must specify unlensed TE power spectrum!"
+                assert 'EE' in C_lens_weight.keys(), "Must specify unlensed EE power spectrum!"
+                assert 'BB' in C_lens_weight.keys(), "Must specify unlensed BB power spectrum!"
+                for k in C_lens_weight.keys():
+                    assert len(C_lens_weight[k])>=self.lmax+1, "Must specify C_lens_weight(l) up to at least lmax."
+                    
+            # Reshape and store
+            self.C_phi = C_phi
+            self.C_lens_weight = {k: C_lens_weight[k][:self.lmax+1] for k in C_lens_weight.keys()}
+            self.to_compute.append(['u','v'])
+        if 'isw-lensing' in templates:
+            # Check inputs
+            assert len(C_Tphi)>0, "Must supply temperature-lensing cross spectrum!"
+            assert len(C_Tphi)>=self.Lmax_lens+1, "Must specify C^T-phi(L) up to at least Lmax."
+            assert not self.pol, "ISW-lensing not implemented for polarization!"
+            if not self.pol:
+                assert 'TT' in C_lens_weight.keys(), "Must specify lensed TT power spectrum!"
+            else:
+                assert 'TE' in C_lens_weight.keys(), "Must specify lensed TE power spectrum!"
+                assert 'EE' in C_lens_weight.keys(), "Must specify lensed EE power spectrum!"
+                assert 'BB' in C_lens_weight.keys(), "Must specify lensed BB power spectrum!"
+                for k in C_lens_weight.keys():
+                    assert len(C_lens_weight[k])>=np.max([self.lmax,self.Lmax_lens])+1, "Must specify C_lens_weight(l) up to at least lmax."
+                    
+            # Reshape and store
+            self.C_Tphi = C_Tphi[:np.max([self.lmax,self.Lmax_lens])+1]
+            self.C_lens_weight = {k: C_lens_weight[k][:np.max([self.lmax,self.Lmax_lens])+1] for k in C_lens_weight.keys()}
+            self.to_compute.append(['u','v','v-isw'])
+        if 'point-source' in templates:
+            self.to_compute.append(['u'])
+               
         for t in templates:
             if 'tauNL-direc' in t:
                 # Compute indices
@@ -387,27 +422,7 @@ class TSpecTemplate():
                 _merge_dict(self.coll_params,{1.0j*mu_s-3./2.:this_params, -1.0j*mu_s-3./2.: this_params})
                 self.ints_coll = True
                 self.ints_1d = True
-            if 'lensing' in t:
-                
-                # Check inputs
-                assert len(C_phi)>0, "Must supply lensing power spectrum!"
-                assert len(C_phi)>=self.Lmax_lens+1, "Must specify C^phi-phi(L) up to at least Lmax."
-                if not self.pol:
-                    assert 'TT' in C_lens_weight.keys(), "Must specify unlensed TT power spectrum!"
-                else:
-                    assert 'TE' in C_lens_weight.keys(), "Must specify unlensed TE power spectrum!"
-                    assert 'EE' in C_lens_weight.keys(), "Must specify unlensed EE power spectrum!"
-                    assert 'BB' in C_lens_weight.keys(), "Must specify unlensed BB power spectrum!"
-                    for k in C_lens_weight.keys():
-                        assert len(C_lens_weight[k])>=self.lmax+1, "Must specify C_lens_weight(l) up to at least lmax."
-                        
-                # Reshape and store
-                self.C_phi = C_phi
-                self.C_lens_weight = {k: C_lens_weight[k][:self.lmax+1] for k in C_lens_weight.keys()}
-                self.to_compute.append(['u','v'])
-            if 'point-source' in t:
-                self.to_compute.append(['u'])
-               
+            
         # Identify unique components 
         self.n1n3n = np.asarray(np.unique(self.n1n3n,axis=0))
         self.coll_params = {k: np.asarray(self.coll_params[k]) for k in self.coll_params.keys()}
@@ -446,7 +461,7 @@ class TSpecTemplate():
         # Create filtering for minimum ls
         self.nLminfilt = self.base.l_arr[self.base.l_arr<=self.nLmax]>=self.nLmin
         self.Lminfilt = self.base.l_arr[self.base.l_arr<=self.Lmax]>=self.Lmin
-        if 'lensing' in self.templates:
+        if 'lensing' in self.templates or 'isw-lensing' in self.templates:
             self.Lminfilt_lens = self.base.l_arr[self.base.l_arr<=self.Lmax_lens]>=self.Lmin_lens
         self.lminfilt = self.base.l_arr[self.base.l_arr<=self.lmax]>=self.lmin
         
@@ -473,7 +488,7 @@ class TSpecTemplate():
             if np.any([('tauNL' in t) for t in self.templates]):
                 print("tauNL -- 2-field transforms: %.2fs"%self.timers['tauNL_products'])
                 print("tauNL -- 4-field summation: %.2fs"%self.timers['tauNL_summation'])
-            if 'lensing' in self.templates:
+            if 'lensing' in self.templates or 'isw-lensing' in self.templates:
                 print("Lensing -- 2-field transforms: %.2fs"%self.timers['lensing_products'])
                 print("Lensing -- 4-field summation: %.2fs"%self.timers['lensing_summation'])
         if (self.timers['fisher']!=0 or self.timers['optimization']!=0):
@@ -620,7 +635,7 @@ class TSpecTemplate():
             print("Computing p_lL^X(r) integrals")
             self.plLXs = np.zeros((2*self.nmax+1,lmax+1,1+2*self.pol,self.N_r),dtype=np.float64,order='C')
             this_nmax = max(self.p_inds)
-            p_integral(self.k_arr, Pzeta_arr, self.Tl_arr, jlkr_all, self.lmin, self.lmax, lmin, lmax, this_nmax, self.base.nthreads, self.plLXs)
+            p_integral_all(self.k_arr, Pzeta_arr, self.Tl_arr, jlkr_all, self.lmin, self.lmax, lmin, lmax, this_nmax, self.base.nthreads, self.plLXs)
             
         if 'q' in self.to_compute and (ints_1d or ints_coll):
             
@@ -649,7 +664,7 @@ class TSpecTemplate():
                 # Compute p integrals in Cython
                 this_nmax = max(self.coll_params[beta][:,0])
                 plLXs = np.zeros((2*this_nmax+1,lmax+1,1+2*self.pol,self.N_r),dtype=np.complex128,order='C')
-                collider_p_integral(self.k_arr, Pzeta_arr, self.Tl_arr, jlkr_all, beta, self.k_coll, self.lmin, self.lmax, lmin, lmax, this_nmax, self.base.nthreads, plLXs)
+                collider_p_integral_all(self.k_arr, Pzeta_arr, self.Tl_arr, jlkr_all, beta, self.k_coll, self.lmin, self.lmax, lmin, lmax, this_nmax, self.base.nthreads, plLXs)
                 self.coll_plLXs[beta] = plLXs
                 del plLXs
                     
@@ -795,10 +810,11 @@ class TSpecTemplate():
                 uniq_weights.append(sum_weight)
             return uniq_n1n3ns, uniq_weights
     
+    ### MAP TRANSFORMATIONS
     @_timer_func('map_transforms')
     def _compute_weighted_maps(self, h_lm_filt, flX_arr, spin=0):
         """
-        Compute [Sum_lm {}_sY_lm(i) f_l^X(i) h_lm] maps for each sampling point i, given the relevant weightings. These are used in the trispectrum numerators and Fisher matrices.
+        Compute [Sum_lm {}_sY_lm(i) f_l^X(i) h_lm^X] maps for each sampling point i, given the relevant weightings. These are used in the trispectrum numerators and Fisher matrices.
         """
         if not (hasattr(self,'r_arr') or hasattr(self,'rtau_arr')):
             raise Exception("Radial arrays have not been computed!")
@@ -893,7 +909,7 @@ class TSpecTemplate():
         U[0] = self.base.to_map(inp_lm[None],lmax=self.lmax)[0]
         
         # Compute X = E, B if implementing lensing estimators
-        if 'lensing' in self.templates:
+        if 'lensing' in self.templates or 'isw-lensing' in self.templates:
             
             if self.pol:
             
@@ -909,43 +925,48 @@ class TSpecTemplate():
         return U
     
     @_timer_func('map_transforms')
-    def _compute_lensing_V_map(self, h_lm_filt):
+    def _compute_lensing_V_map(self, h_lm_filt, isw=False):
         """
-        Compute lensing V map from a given data vector. These are used in the trispectrum numerators.
-        
-        We return [[V^T+, V^T-], [V^E+, V^E-], [V^B+, V^B-]].
+        Compute lensing V map from a given data vector. These are used in the trispectrum numerators. This can also compute the ISW-weighted fields.
         """
-        
-        ls = self.base.l_arr[self.lfilt]
         
         # Output array
         V = np.zeros((1+2*self.pol,self.base.Npix),dtype=np.complex128,order='C')
             
         if not self.pol:
-            pref = np.sqrt(ls*(ls+1.))*self.C_lens_weight['TT'][ls]
-            inp_lm = np.zeros(len(self.lminfilt),dtype=np.complex128)
-            inp_lm[self.lminfilt] = pref*h_lm_filt[0]
-            V[0] = self.base.to_map_spin(-inp_lm,inp_lm,spin=1,lmax=self.lmax)[1] # h_lm (-1)Y_lm
-            del pref, inp_lm
+            if not isw:
+                pref = np.sqrt(self.ls*(self.ls+1.))*self.C_lens_weight['TT'][self.ls]
+                inp_lm = np.zeros(len(self.lminfilt),dtype=np.complex128)
+                inp_lm[self.lminfilt] = pref*h_lm_filt[0]
+                V[0] = self.base.to_map_spin(-inp_lm,inp_lm,spin=1,lmax=self.lmax)[1] # h_lm (-1)Y_lm
+                del pref, inp_lm
+            else:
+                # Apply C_l^{Tphi} filtering for ISW maps
+                pref = np.sqrt(self.ls*(self.ls+1.))*self.C_Tphi[self.ls]
+                inp_lm = np.zeros(len(self.lminfilt),dtype=np.complex128)
+                inp_lm[self.lminfilt] = pref*h_lm_filt[0]
+                V[0] = self.base.to_map_spin(-inp_lm,inp_lm,spin=1,lmax=self.lmax)[1] # h_lm (-1)Y_lm
+                del pref, inp_lm
         
         else:
-        
+            if isw: raise Exception("Not yet implemented!")
+            
             # Output array
             V = np.zeros((1+2*self.pol,self.base.Npix),dtype=np.complex128,order='C')
             
             # Spin-0, X = T
-            pref = np.sqrt(ls*(ls+1.))
-            wienerT = (self.C_lens_weight['TT'][ls]*h_lm_filt[0]+self.C_lens_weight['TE'][ls]*h_lm_filt[1])
+            pref = np.sqrt(self.ls*(self.ls+1.))
+            wienerT = (self.C_lens_weight['TT'][self.ls]*h_lm_filt[0]+self.C_lens_weight['TE'][self.ls]*h_lm_filt[1])
             inp_lm = np.zeros(len(self.lminfilt),dtype=np.complex128)
             inp_lm[self.lminfilt] = pref*wienerT
             V[0] = self.base.to_map_spin(-inp_lm,inp_lm,spin=1,lmax=self.lmax)[1] # h_lm (-1)Y_lm
             del inp_lm
             
             # Spin-2
-            pref_p = np.sqrt((ls+2.)*(ls-1.))
-            pref_m = np.sqrt((ls-2.)*(ls+3.))
-            wienerE = (self.C_lens_weight['TE'][ls]*h_lm_filt[0]+self.C_lens_weight['EE'][ls]*h_lm_filt[1])
-            wienerB = self.C_lens_weight['BB'][ls]*h_lm_filt[2]
+            pref_p = np.sqrt((self.ls+2.)*(self.ls-1.))
+            pref_m = np.sqrt((self.ls-2.)*(self.ls+3.))
+            wienerE = (self.C_lens_weight['TE'][self.ls]*h_lm_filt[0]+self.C_lens_weight['EE'][self.ls]*h_lm_filt[1])
+            wienerB = self.C_lens_weight['BB'][self.ls]*h_lm_filt[2]
             inp_lm_re = np.zeros(len(self.lminfilt),dtype=np.complex128)
             inp_lm_im = np.zeros(len(self.lminfilt),dtype=np.complex128)
             
@@ -1028,7 +1049,10 @@ class TSpecTemplate():
             return np.asarray([self._compute_lensing_U_map(imap) for imap in input_maps], order='C')        
             
         elif filtering=='V':
-            return np.asarray([self._compute_lensing_V_map(imap) for imap in input_maps], order='C')        
+            return np.asarray([self._compute_lensing_V_map(imap, isw=False) for imap in input_maps], order='C')        
+        
+        elif filtering=='V-ISW':
+            return np.asarray([self._compute_lensing_V_map(imap, isw=True) for imap in input_maps], order='C')        
         
         else:
             raise Exception("Filtering %s is not implemented!"%filtering)
@@ -1090,142 +1114,31 @@ class TSpecTemplate():
             output['u'] = self._compute_lensing_U_map(input_map)        
             
         if 'v' in self.to_compute:
-            output['v'] = self._compute_lensing_V_map(input_map)
+            output['v'] = self._compute_lensing_V_map(input_map, isw=False)
+            
+        if 'v-isw' in self.to_compute:
+            output['v-isw'] = self._compute_lensing_V_map(input_map, isw=True)
         
         return output
     
     @_timer_func('lensing_products')
-    def _compute_lensing_Phi(self, maps1, maps2, add_sym=False):
-        """Compute the Phi_LM field used in the lensing estimators."""    
+    def _compute_lensing_Phi(self, maps1, maps2, add_sym=False, isw=False):
+        """Compute the Phi_LM field used in the lensing estimators. We can also compute the ISW-weighted version."""    
+        
+        # Define v index for ISW or regular estimators
+        if isw:
+            v_index = 'v-isw'
+        else:
+            v_index = 'v'
         
         # First sum over U and V maps to form the spin-1 maps (in Cython for speed)
         if add_sym:
-            input_map = lens_phi_sum_sym(maps1['u'], maps2['u'], maps1['v'], maps2['v'], self.base.nthreads)
+            input_map = lens_phi_sum_sym(maps1['u'], maps2['u'], maps1[v_index], maps2[v_index], self.base.nthreads)
         else:
-            input_map = lens_phi_sum(maps1['u'], maps2['v'], self.base.nthreads)
+            input_map = lens_phi_sum(maps1['u'], maps2[v_index], self.base.nthreads)
         
         # Now compute spin-1 transforms
         return -0.25*np.sum(np.array([1,-1])[:,None]*self.base.to_lm_spin(input_map,input_map.conj(),spin=1,lmax=self.Lmax_lens),axis=0)[self.Lminfilt_lens]
-        
-    def _process_sim(self, sim_pair, input_type='map'):
-        """
-        Process a single pair of input simulations. This is used for the 2- and 0-field term of the trispectrum estimator.
-        
-        We return a set of weighted maps for this simulation (filtered by e.g. p_l^X).
-        """
-        # Transform to Fourier space and normalize appropriately
-        t_init = time.time()
-        h_alpha_lm = np.asarray(self.applySinv(sim_pair[0], input_type=input_type, lmax=self.lmax)[:,self.lminfilt],order='C')
-        h_beta_lm =  np.asarray(self.applySinv(sim_pair[1], input_type=input_type, lmax=self.lmax)[:,self.lminfilt],order='C')
-        self.timers['Sinv'] += time.time()-t_init
-        
-        # Compute H_alpha and H_beta maps
-        proc_a_maps = self._apply_all_filters(h_alpha_lm)
-        proc_b_maps = self._apply_all_filters(h_beta_lm)
-        
-        return proc_a_maps, proc_b_maps
-    
-    def load_sims(self, load_sim_pair, N_pairs, verb=False, preload=True, input_type='map'):
-        """
-        Load in and preprocess N_sim pairs of Monte Carlo simulations used in the two- and zero-field terms of the trispectrum estimator.
-
-        The input is a function which loads the pairs of simulations in map- or harmonic-space given an index (0 to N_pairs-1).
-
-        If preload=False, the simulation products will not be stored in memory, but instead accessed when necessary. This greatly reduces memory usage, but is less CPU efficient if many datasets are analyzed together.
-        
-        These can alternatively be generated with a fiducial spectrum using the generate_sims script.
-        """
-        
-        self.N_it = N_pairs
-        print("Using %d pairs of Monte Carlo simulations"%self.N_it)
-
-        if preload:
-            self.preload = True
-            
-            # Check we have initialized correctly
-            if self.ints_1d and (not hasattr(self,'r_arr')):
-                raise Exception("Need to supply radial integration points or run optimize_radial_sampling_1d()!")
-            if self.ints_2d and (not hasattr(self,'rtau_arr')):
-                raise Exception("Need to supply radial/tau integration points or run optimize_radial_sampling_2d()!")
-
-            #  Define lists of maps
-            self.proc_a_maps, self.proc_b_maps = [],[]
-
-            # Iterate over simulations and preprocess appropriately    
-            for ii in range(self.N_it):
-                if ii%5==0 and verb: print("Processing bias simulation pair %d of %d"%(ii+1,self.N_it))
-
-                sim_pair = load_sim_pair(ii)
-                proc_a_maps, proc_b_maps = self._process_sim(sim_pair, input_type=input_type)
-                
-                # Compute P and Q maps
-                self.proc_a_maps.append(proc_a_maps)
-                self.proc_b_maps.append(proc_b_maps)
-                
-        else:
-            self.preload = False
-            if verb: print("No preloading; simulations will be loaded and accessed at runtime.")
-
-            # Simply save iterator and continue (simulations will be processed in serial later) 
-            self.load_sim_data = lambda ii: self._process_sim(load_sim_pair(ii), input_type=input_type)
-            
-    def generate_sims(self, N_pairs, Cl_input=[], preload=True, verb=False):
-        """
-        Generate Monte Carlo simulations used in the two- and zero-field terms of the trispectrum generator. 
-        These are pure GRFs. By default, these are beam-convolved and generated with the input survey mask.
-        
-        If preload=True, we create N_pairs of simulations and store the relevant transformations into memory.
-        If preload=False, we store only the function used to generate the sims, which will be processed later. This is cheaper on memory, but less CPU efficient if many datasets are analyzed together.
-        
-        We can alternatively load custom simulations using the load_sims script.
-        """
-        
-        self.N_it = N_pairs
-        print("Using %d pairs of Monte Carlo simulations"%self.N_it)
-        
-        # Define input power spectrum (with noise)
-        if len(Cl_input)==0:
-            Cl_input = self.base.Cl_tot
-
-        if preload:
-            self.preload = True
-            
-            # Check we have initialized correctly
-            if self.ints_1d and (not hasattr(self,'r_arr')):
-                raise Exception("Need to supply radial integration points or run optimize_radial_sampling_1d()!")
-            if self.ints_2d and (not hasattr(self,'rtau_arr')):
-                raise Exception("Need to supply radial/tau integration points or run optimize_radial_sampling_2d()!")
-
-            # Define lists of maps
-            self.proc_a_maps, self.proc_b_maps = [],[]
-            
-            # Iterate over simulations
-            for ii in range(self.N_it):
-                if ii%5==0 and verb: print("Generating bias simulation pair %d of %d"%(ii+1,self.N_it))
-                
-                # Generate (beam-convolved and masked) simulation and Fourier transform
-                if self.ones_mask:
-                    alpha_lm = self.base.generate_data(int(1e5)+ii, Cl_input=Cl_input, output_type='harmonic', lmax=self.lmax, deconvolve_beam=False)
-                    beta_lm  = self.base.generate_data(int(2e5)+ii, Cl_input=Cl_input, output_type='harmonic', lmax=self.lmax, deconvolve_beam=False)
-                    proc_a_maps, proc_b_maps = self._process_sim([alpha_lm, beta_lm], input_type='harmonic')
-                else:
-                    alpha = self.mask*self.base.generate_data(int(1e5)+ii, Cl_input=Cl_input, deconvolve_beam=False)
-                    beta  = self.mask*self.base.generate_data(int(2e5)+ii, Cl_input=Cl_input, deconvolve_beam=False)
-                    proc_a_maps, proc_b_maps = self._process_sim([alpha, beta])
-            
-                # Compute P and Q maps
-                self.proc_a_maps.append(proc_a_maps)
-                self.proc_b_maps.append(proc_b_maps)
-
-        else:
-            self.preload = False
-            if verb: print("No preloading; simulations will be loaded and accessed at runtime.")
-            
-            # Simply save iterator and continue (simulations will be processed in serial later) 
-            if self.ones_mask:
-                self.load_sim_data = lambda ii: self._process_sim([self.base.generate_data(int(1e5)+ii, Cl_input=Cl_input, output_type='harmonic', deconvolve_beam=False),self.base.generate_data(int(2e5)+ii, Cl_input=Cl_input, output_type='harmonic', deconvolve_beam=False)], input_type='harmonic')
-            else:
-                self.load_sim_data = lambda ii: self._process_sim([self.mask*self.base.generate_data(int(1e5)+ii, Cl_input=Cl_input, deconvolve_beam=False),self.mask*self.base.generate_data(int(2e5)+ii, Cl_input=Cl_input, deconvolve_beam=False)])
         
     @_timer_func('tauNL_summation')
     def _tau_sum(self, A, B, weights, n1, n3, n):
@@ -1333,626 +1246,128 @@ class TSpecTemplate():
                 output.append(out)
         return np.asarray(output)
         
-    ### OPTIMAL ESTIMATOR
-    @_timer_func('numerator')
-    def Tl_numerator(self, data, include_disconnected_term=True, verb=False, input_type='map'):
+    ### SIMULATION FUNCTIONS
+    def _process_sim(self, sim_pair, input_type='map'):
         """
-        Compute the numerator of the unwindowed trispectrum estimator for all templates, given some data (either in map or harmonic space).
-
-        We can also optionally switch off the disconnected terms, which affects only parity-conserving trispectra.
+        Process a single pair of input simulations. This is used for the 2- and 0-field term of the trispectrum estimator.
+        
+        We return a set of weighted maps for this simulation (filtered by e.g. p_l^X).
         """
-        # Check we have initialized correctly
-        if self.ints_1d and (not hasattr(self,'r_arr')):
-            raise Exception("Need to supply radial integration points or run optimize_radial_sampling_1d()!")
-        if self.ints_2d and (not hasattr(self,'rtau_arr')):
-            raise Exception("Need to supply radial/tau integration points or run optimize_radial_sampling_2d()!")
-        
-        # Check if simulations have been supplied
-        if not hasattr(self, 'preload') and include_disconnected_term:
-            raise Exception("Need to generate or specify bias simulations!")
-        
-        # Check input data format
-        if self.pol:
-            assert len(data)==3, "Data must contain T, Q, U components!"
-        else:
-            assert (len(data)==1 and len(data[0])==self.base.Npix) or len(data)==self.base.Npix, "Data must contain T only!"
-
-        # Decide whether to compute t0 term, if not already computed
-        if hasattr(self, 't0_num') and include_disconnected_term:
-            compute_t0 = False
-            if verb: print("Using precomputed t0 term")
-        else:
-            compute_t0 = True
-
-        # Apply S^-1 to data and transform to harmonic space
+        # Transform to Fourier space and normalize appropriately
         t_init = time.time()
-        h_data_lm = np.asarray(self.applySinv(data, input_type=input_type, lmax=self.lmax)[:,self.lminfilt], order='C')
+        h_alpha_lm = np.asarray(self.applySinv(sim_pair[0], input_type=input_type, lmax=self.lmax)[:,self.lminfilt],order='C')
+        h_beta_lm =  np.asarray(self.applySinv(sim_pair[1], input_type=input_type, lmax=self.lmax)[:,self.lminfilt],order='C')
         self.timers['Sinv'] += time.time()-t_init
-                
-        # Compute all relevant weighted maps
-        proc_maps = self._apply_all_filters(h_data_lm)
         
-        # Define 4-, 2- and 0-field arrays
-        t4_num = np.zeros(len(self.templates))
-        A_maps_dd = {}
-        if not include_disconnected_term:
-            print("## No subtraction of (parity-conserving) disconnected terms performed!")
+        # Compute processed maps
+        proc_a_maps = self._apply_all_filters(h_alpha_lm)
+        proc_b_maps = self._apply_all_filters(h_beta_lm)
+        
+        return proc_a_maps, proc_b_maps
+    
+    def load_sims(self, load_sim_pair, N_pairs, verb=False, preload=True, input_type='map'):
+        """
+        Load in and preprocess N_sim pairs of Monte Carlo simulations used in the two- and zero-field terms of the trispectrum estimator.
+
+        The input is a function which loads the pairs of simulations in map- or harmonic-space given an index (0 to N_pairs-1).
+
+        If preload=False, the simulation products will not be stored in memory, but instead accessed when necessary. This greatly reduces memory usage, but is less CPU efficient if many datasets are analyzed together.
+        
+        These can alternatively be generated with a fiducial spectrum using the generate_sims script.
+        """
+        
+        self.N_it = N_pairs
+        print("Using %d pairs of Monte Carlo simulations"%self.N_it)
+
+        if preload:
+            self.preload = True
+            
+            # Check we have initialized correctly
+            if self.ints_1d and (not hasattr(self,'r_arr')):
+                raise Exception("Need to supply radial integration points or run optimize_radial_sampling_1d()!")
+            if self.ints_2d and (not hasattr(self,'rtau_arr')):
+                raise Exception("Need to supply radial/tau integration points or run optimize_radial_sampling_2d()!")
+
+            #  Define lists of maps
+            self.proc_a_maps, self.proc_b_maps = [],[]
+
+            # Iterate over simulations and preprocess appropriately    
+            for ii in range(self.N_it):
+                if ii%5==0 and verb: print("Processing bias simulation pair %d of %d"%(ii+1,self.N_it))
+
+                sim_pair = load_sim_pair(ii)
+                proc_a_maps, proc_b_maps = self._process_sim(sim_pair, input_type=input_type)
+                
+                # Compute P and Q maps
+                self.proc_a_maps.append(proc_a_maps)
+                self.proc_b_maps.append(proc_b_maps)
+                
         else:
-            t2_num = np.zeros(len(self.templates))
-            if compute_t0: t0_num = np.zeros(len(self.templates))
+            self.preload = False
+            if verb: print("No preloading; simulations will be loaded and accessed at runtime.")
+
+            # Simply save iterator and continue (simulations will be processed in serial later) 
+            self.load_sim_data = lambda ii: self._process_sim(load_sim_pair(ii), input_type=input_type)
+            
+    def generate_sims(self, N_pairs, Cl_input=[], preload=True, verb=False):
+        """
+        Generate Monte Carlo simulations used in the two- and zero-field terms of the trispectrum generator. 
+        These are pure GRFs. By default, these are beam-convolved and generated with the input survey mask.
         
-        if verb: print("# Assembling trispectrum numerator (4-field term)")
-        for ii,t in enumerate(self.templates):
+        If preload=True, we create N_pairs of simulations and store the relevant transformations into memory.
+        If preload=False, we store only the function used to generate the sims, which will be processed later. This is cheaper on memory, but less CPU efficient if many datasets are analyzed together.
+        
+        We can alternatively load custom simulations using the load_sims script.
+        """
+        
+        self.N_it = N_pairs
+        print("Using %d pairs of Monte Carlo simulations"%self.N_it)
+        
+        # Define input power spectrum (with noise)
+        if len(Cl_input)==0:
+            Cl_input = self.base.Cl_tot
+
+        if preload:
+            self.preload = True
             
-            if t=='gNL-loc':
-                # gNL local template
-                t_init = time.time()
-                if verb: print("Computing gNL-loc template")
-                t4_num[ii] = 9./100.*self.utils.gnl_loc_sum(self.r_weights[t], proc_maps['p00'], proc_maps['q'])*4.*self.base.A_pix*(4.*np.pi)**(1.5)
-                self.timers['gNL_summation'] += time.time()-t_init
+            # Check we have initialized correctly
+            if self.ints_1d and (not hasattr(self,'r_arr')):
+                raise Exception("Need to supply radial integration points or run optimize_radial_sampling_1d()!")
+            if self.ints_2d and (not hasattr(self,'rtau_arr')):
+                raise Exception("Need to supply radial/tau integration points or run optimize_radial_sampling_2d()!")
 
-            if t=='gNL-con':
-                # gNL constant template
-                t_init = time.time()
-                if verb: print("Computing gNL-con template")
-                t4_num[ii] = 9./25.*self.utils.gnl_con_sum(self.r_weights[t], proc_maps['r'])*self.base.A_pix
-                self.timers['gNL_summation'] += time.time()-t_init
-
-            if t=='gNL-dotdot':
-                # gNL-dot{pi}^4 EFTI shape
-                t_init = time.time()
-                if verb: print("Computing gNL-dotdot template")
-                t4_num[ii] = 384./25.*self.utils.gnl_dotdot_sum(self.rtau_weights[t], self.rtau_arr[:,1], proc_maps['a'])*self.base.A_pix
-                self.timers['gNL_summation'] += time.time()-t_init
-
-            if t=='gNL-dotdel':
-                # gNL-dot{pi}^2del{pi}^2 EFTI shape
-                t_init = time.time()
-                if verb: print("Computing gNL-dotdel template")
-                t4_num[ii] = 288./325.*self.utils.gnl_dotdel_sum(self.rtau_weights[t], self.rtau_arr[:,1], proc_maps['a'], proc_maps['b'], proc_maps['c'])*12*self.base.A_pix
-                self.timers['gNL_summation'] += time.time()-t_init
-
-            if t=='gNL-deldel':
-                # gNL-del{pi}^4 EFTI shape
-                t_init = time.time()
-                if verb: print("Computing gNL-deldel template")
-                t4_num[ii] = 1728./2575.*self.utils.gnl_deldel_sum(self.rtau_weights[t],proc_maps['b'],proc_maps['c'])*6*self.base.A_pix
-                self.timers['gNL_summation'] += time.time()-t_init
-
-            if t=='tauNL-loc':
-                # tauNL-loc template
-                if verb: print("Computing tauNL-loc template")
-
-                # Compute A maps (unless already computed)
-                if 0 not in A_maps_dd.keys():
-                    A_maps_dd[0] = self._A_maps(proc_maps, proc_maps, 0)
-                
-                # Compute 4-field term (adding factors of Sqrt[4pi] to correct for Y_00 factors]
-                t4_num[ii] = 1./24.*self._tau_sum(A_maps_dd, A_maps_dd, self.r_weights[t], 0, 0, 0)*12.*(4.*np.pi)**(3./2.)
-                
-            if 'tauNL-direc' in t:
-                # Direction-dependent tauNL
-                n1,n3,n = np.asarray(t.split(':')[1].split(',')).astype(int)
-                if verb: print("Computing tauNL-direc(%d,%d,%d) template"%(n1,n3,n))
-                
-                ## Compute 4-field term
-                # Compute A maps (unless already computed)
-                if n1 not in A_maps_dd.keys():
-                    A_maps_dd[n1] = self._A_maps(proc_maps, proc_maps, n1)
-                if n3 not in A_maps_dd.keys():
-                    A_maps_dd[n3] = self._A_maps(proc_maps, proc_maps, n3)
-                
-                # Compute tau from these maps
-                t4_num[ii] = self._tau_sum(A_maps_dd, A_maps_dd, self.r_weights[t], n1, n3, n)/48.*24.
-                
-            if 'tauNL-even' in t:
-                # Direction-dependent tauNL (parity-even)
-                n = int(t.split(':')[1])
-                if verb: print("Computing tauNL-even(%d) template"%n)
-                
-                if n not in A_maps_dd.keys():
-                    A_maps_dd[n] = self._A_maps(proc_maps, proc_maps, n)
-                if 0 not in A_maps_dd.keys():
-                    A_maps_dd[0] = self._A_maps(proc_maps, proc_maps, 0)
-                pref = (-1.)**n*(4.*np.pi)**(3./2.)/np.sqrt(2.*n+1.)
-                if n==0:
-                    tau = 3*self._tau_sum(A_maps_dd, A_maps_dd, self.r_weights[t], 0, 0, 0)
-                else:
-                    tau = self._tau_sum(A_maps_dd, A_maps_dd, self.r_weights[t], n, n, 0)
-                    tau += 2*self._tau_sum(A_maps_dd, A_maps_dd, self.r_weights[t], 0, n, n)
-                
-                t4_num[ii] = 1./48.*tau*pref*8.
-                
-            if 'tauNL-odd' in t:
-                # Direction-dependent tauNL (parity-odd)
-                n = int(t.split(':')[1])
-                n1n3ns, weights = self._decompose_tauNL_odd(n)
-                if verb: print("Computing tauNL-odd(%d) template"%n)
-                
-                # Iterate over n1,n3,n combinations
-                tau = 0.
-                for ind in range(len(n1n3ns)):
-                    n1, n3, n = n1n3ns[ind]
-                    
-                    # Compute relevant A maps
-                    if n1 not in A_maps_dd.keys():
-                        A_maps_dd[n1] = self._A_maps(proc_maps, proc_maps, n1)
-                    if n3 not in A_maps_dd.keys():
-                        A_maps_dd[n3] = self._A_maps(proc_maps, proc_maps, n3)
-                
-                    # Compute sum of A pairs
-                    tau += weights[ind]*self._tau_sum(A_maps_dd, A_maps_dd, self.r_weights[t], n1, n3, n)
-                
-                # Assemble 4-field term
-                t4_num[ii] = 1./48.*tau*24.
-                
-            if 'tauNL-light' in t:
-                # Light particle collider tauNL
-                s = int(t.split(':')[1].split(',')[0])
-                nu_s = float(t.split(':')[1].split(',')[1])
-                if verb: print("Computing tauNL-light(%d,%.2f) template"%(s,nu_s))
-                
-                # Compute A maps (unless already computed)
-                coll_str = 'coll-%d,%.8f,%.8fi'%(s,-1.5+nu_s,0)
-                if coll_str not in A_maps_dd.keys():
-                    A_maps_dd[coll_str] = self._A_maps(proc_maps, proc_maps, s, beta=-1.5+nu_s)
-                
-                # Compute 4-field term (internally taking real part)
-                t4_num[ii] = self._tau_sum_collider(A_maps_dd, A_maps_dd, self.r_weights[t], s, -1.5+nu_s)/24.*12.
-                
-            if 'tauNL-heavy' in t:
-                # Heavy particle collider tauNL
-                s = int(t.split(':')[1].split(',')[0])
-                mu_s = float(t.split(':')[1].split(',')[1])
-                if verb: print("Computing tauNL-heavy(%d,%.2f) template"%(s,mu_s))
-                
-                # Compute A maps (unless already computed)
-                pos_str = 'coll-%d,%.8f,%.8fi'%(s,-1.5,-1.0*mu_s)
-                neg_str = 'coll-%d,%.8f,%.8fi'%(s,-1.5,+1.0*mu_s)
-                if pos_str not in A_maps_dd.keys():
-                    A_maps_dd[pos_str] = self._A_maps(proc_maps, proc_maps, s, False, beta=-1.5-1.0j*mu_s)
-                if neg_str not in A_maps_dd.keys():
-                    A_maps_dd[neg_str] = self._A_maps(proc_maps, proc_maps, s, False, beta=-1.5+1.0j*mu_s)
-                
-                # Compute 4-field term (internally taking real part)
-                t4_num[ii] = self._tau_sum_collider(A_maps_dd, A_maps_dd, self.r_weights[t], s, -1.5-1.0j*mu_s)/24.*12.
-                
-            if t=='lensing':
-                # Lensing template
-                if verb: print("Computing lensing template")
-
-                ## Compute estimator
-                Phi_dd = self._compute_lensing_Phi(proc_maps,proc_maps)
-                Ls = self.base.l_arr[(self.base.l_arr>=self.Lmin_lens)*(self.base.l_arr<=self.Lmax_lens)]
-                Ms = self.base.m_arr[(self.base.l_arr>=self.Lmin_lens)*(self.base.l_arr<=self.Lmax_lens)]
-                t_init = time.time()
-                t4_num[ii] = 1./24.*np.sum(Ls*(Ls+1.)*Phi_dd*Phi_dd.conj()*(1.+(Ms>0))*self.C_phi[Ls]).real*12.
-                self.timers['lensing_summation'] += time.time()-t_init
-               
-            if t=='point-source':
-                # Point-source template
-                t_init = time.time()
-                if verb: print("Computing point-source template")
-                t4_num[ii] = 1./24.*np.sum(proc_maps['u'][0].real**4.)*self.base.A_pix
-                self.timers['gNL_summation'] += time.time()-t_init
+            # Define lists of maps
+            self.proc_a_maps, self.proc_b_maps = [],[]
             
-        if include_disconnected_term:
-
             # Iterate over simulations
-            for isim in range(self.N_it):
-                if not compute_t0:
-                    if verb: print("# Assembling 2-field trispectrum numerator for simulation pair %d of %d "%(isim+1,self.N_it))
-                else:
-                    if verb: print("# Assembling 2-field and 0-field trispectrum numerator for simulation pair %d of %d"%(isim+1,self.N_it))
-
-                # Load processed bias simulations
-                if self.preload:
-                    this_proc_a_maps = self.proc_a_maps[isim]
-                    this_proc_b_maps = self.proc_b_maps[isim]
-                else:
-                    this_proc_a_maps, this_proc_b_maps = self.load_sim_data(isim)
+            for ii in range(self.N_it):
+                if ii%5==0 and verb: print("Generating bias simulation pair %d of %d"%(ii+1,self.N_it))
                 
-                # Define empty exchange dictionaries
-                A_maps_aa = {}
-                A_maps_ab_sym = {}
-                A_maps_bb = {}
-                A_maps_ad_sym = {}
-                A_maps_bd_sym = {}
+                # Generate (beam-convolved and masked) simulation and Fourier transform
+                if self.ones_mask:
+                    alpha_lm = self.base.generate_data(int(1e5)+ii, Cl_input=Cl_input, output_type='harmonic', lmax=self.lmax, deconvolve_beam=False)
+                    beta_lm  = self.base.generate_data(int(2e5)+ii, Cl_input=Cl_input, output_type='harmonic', lmax=self.lmax, deconvolve_beam=False)
+                    proc_a_maps, proc_b_maps = self._process_sim([alpha_lm, beta_lm], input_type='harmonic')
+                else:
+                    alpha = self.mask*self.base.generate_data(int(1e5)+ii, Cl_input=Cl_input, deconvolve_beam=False)
+                    beta  = self.mask*self.base.generate_data(int(2e5)+ii, Cl_input=Cl_input, deconvolve_beam=False)
+                    proc_a_maps, proc_b_maps = self._process_sim([alpha, beta])
+            
+                # Compute P and Q maps
+                self.proc_a_maps.append(proc_a_maps)
+                self.proc_b_maps.append(proc_b_maps)
 
-                # Compute templates
-                for ii,t in enumerate(self.templates):
-                    
-                    if t=='gNL-loc':
-                        t_init = time.time()
-                        
-                        def _return_perm(map12, map34):
-                            return self.utils.gnl_loc_disc_sum(self.r_weights[t], map12['p00'], map34['p00'], map12['q'], map34['q'])
-                        
-                        # First set of fields
-                        summ  = _return_perm(proc_maps, this_proc_a_maps)
-                        # Second set of fields
-                        summ += _return_perm(proc_maps, this_proc_b_maps)
-                        t2_num[ii] += -54./100.*summ/self.N_it*self.base.A_pix*(4.*np.pi)**(1.5)
-
-                        if compute_t0:
-                            summ  = _return_perm(this_proc_a_maps, this_proc_b_maps)
-                            t0_num[ii] += 54./100.*summ/self.N_it*self.base.A_pix*(4.*np.pi)**(1.5)
-                        self.timers['gNL_summation'] += time.time()-t_init
-
-                    if t=='gNL-con':
-                        t_init = time.time()
-                        
-                        def _return_perm(map12, map34):
-                            return self.utils.gnl_con_disc_sum(self.r_weights[t], map12['r'], map34['r'])
-                        
-                        # First set of fields
-                        summ = _return_perm(proc_maps, this_proc_a_maps)
-                        # Second set of fields
-                        summ += _return_perm(proc_maps, this_proc_b_maps)
-                        t2_num[ii] += -27./25.*summ/self.N_it*self.base.A_pix
-
-                        if compute_t0:
-                            summ = _return_perm(this_proc_a_maps, this_proc_b_maps)
-                            t0_num[ii] += 27./25.*summ/self.N_it*self.base.A_pix
-                        self.timers['gNL_summation'] += time.time()-t_init
-
-                    if t=='gNL-dotdot':
-                        t_init = time.time()
-                        
-                        def _return_perm(map12,map34):
-                            return self.utils.gnl_dotdot_disc_sum(self.rtau_weights[t], self.rtau_arr[:,1], map12['a'], map34['a'])
-                        
-                        # First set of fields
-                        summ  = _return_perm(proc_maps, this_proc_a_maps)
-                        # Second set of fields
-                        summ += _return_perm(proc_maps, this_proc_b_maps)
-                        t2_num[ii] += -1152./25.*summ/self.N_it*self.base.A_pix
-                        
-                        if compute_t0:
-                            summ  = _return_perm(this_proc_a_maps, this_proc_b_maps)
-                            t0_num[ii] += 1152./25.*summ/self.N_it*self.base.A_pix
-                        self.timers['gNL_summation'] += time.time()-t_init
-
-                    if t=='gNL-dotdel':
-                        t_init = time.time()
-                        
-                        def _return_perm(map1,map2,map3,map4):
-                            return self.utils.gnl_dotdel_disc_sum(self.rtau_weights[t], self.rtau_arr[:,1], map1['a'],map2['a'],map3['b'],map4['b'],map3['c'],map4['c'])
-                        
-                        # First set of fields
-                        summ  = 2*_return_perm(this_proc_a_maps,this_proc_a_maps,proc_maps,proc_maps)
-                        summ += 8*_return_perm(this_proc_a_maps,proc_maps,this_proc_a_maps,proc_maps)
-                        summ += 2*_return_perm(proc_maps,proc_maps,this_proc_a_maps,this_proc_a_maps)
-                        # Second set of fields
-                        summ += 2*_return_perm(this_proc_b_maps,this_proc_b_maps,proc_maps,proc_maps)
-                        summ += 8*_return_perm(this_proc_b_maps,proc_maps,this_proc_b_maps,proc_maps)
-                        summ += 2*_return_perm(proc_maps,proc_maps,this_proc_b_maps,this_proc_b_maps)
-                        t2_num[ii] += -864./325.*summ/self.N_it*self.base.A_pix
-
-                        if compute_t0:
-                            summ  = 2*_return_perm(this_proc_a_maps,this_proc_a_maps,this_proc_b_maps,this_proc_b_maps)
-                            summ += 8*_return_perm(this_proc_a_maps,this_proc_b_maps,this_proc_a_maps,this_proc_b_maps)
-                            summ += 2*_return_perm(this_proc_b_maps,this_proc_b_maps,this_proc_a_maps,this_proc_a_maps)
-                            t0_num[ii] += 864./325.*summ/self.N_it*self.base.A_pix
-                        self.timers['gNL_summation'] += time.time()-t_init
-                        
-                    if t=='gNL-deldel':
-                        t_init = time.time()
-                        
-                        ## Sum over 4 permutations
-                        
-                        def _return_perm(map1,map2,map3,map4):
-                            return self.utils.gnl_deldel_disc_sum(self.rtau_weights[t], map1['b'], map2['b'], map3['b'], map4['b'], map1['c'], map2['c'], map3['c'], map4['c'])
-                            
-                        # First set of fields
-                        summ =  2*_return_perm(this_proc_a_maps,this_proc_a_maps,proc_maps,proc_maps)
-                        summ += 4*_return_perm(this_proc_a_maps,proc_maps,this_proc_a_maps,proc_maps)
-                        # Second set of fields
-                        summ += 2*_return_perm(this_proc_b_maps,this_proc_b_maps,proc_maps,proc_maps)
-                        summ += 4*_return_perm(this_proc_b_maps,proc_maps,this_proc_b_maps,proc_maps)
-                        t2_num[ii] += -5184./2575.*summ/self.N_it*self.base.A_pix
-
-                        if compute_t0:
-                            ## Sum over 4 permutations
-                            summ =  2*_return_perm(this_proc_a_maps,this_proc_a_maps,this_proc_b_maps,this_proc_b_maps)
-                            summ += 4*_return_perm(this_proc_a_maps,this_proc_b_maps,this_proc_a_maps,this_proc_b_maps)
-                            t0_num[ii] += 5184./2575.*summ/self.N_it*self.base.A_pix
-                        self.timers['gNL_summation'] += time.time()-t_init
-
-                    if t=='tauNL-loc':
-                        
-                        # First set of fields
-                        if 0 not in A_maps_aa.keys():
-                            A_maps_aa[0] = self._A_maps(this_proc_a_maps,this_proc_a_maps, 0)
-                            A_maps_ad_sym[0] = self._A_maps(this_proc_a_maps, proc_maps, 0, add_sym=True)
-                        tau  = 4*self._tau_sum(A_maps_aa,A_maps_dd, self.r_weights[t], 0, 0, 0)
-                        tau += 2*self._tau_sum(A_maps_ad_sym,A_maps_ad_sym, self.r_weights[t], 0, 0, 0)
-                        
-                        # Second set of fields
-                        if 0 not in A_maps_bb.keys():
-                            A_maps_bb[0] = self._A_maps(this_proc_b_maps,this_proc_b_maps, 0)
-                            A_maps_bd_sym[0] = self._A_maps(this_proc_b_maps, proc_maps, 0, add_sym=True)
-                        tau += 4*self._tau_sum(A_maps_bb,A_maps_dd, self.r_weights[t], 0, 0, 0)
-                        tau += 2*self._tau_sum(A_maps_bd_sym,A_maps_bd_sym, self.r_weights[t], 0, 0, 0)
-                        
-                        t2_num[ii] += -1./24.*tau*6/self.N_it/2.*(4.*np.pi)**(3./2.)
-
-                        if compute_t0:
-                            # Compute additional (P*Q)_lm fields
-                            if 0 not in A_maps_ab_sym.keys():
-                                A_maps_ab_sym[0] = self._A_maps(this_proc_a_maps, this_proc_b_maps, 0, add_sym=True)
-                            tau  = 4*self._tau_sum(A_maps_aa,A_maps_bb, self.r_weights[t], 0, 0, 0)
-                            tau += 2*self._tau_sum(A_maps_ab_sym,A_maps_ab_sym, self.r_weights[t], 0, 0, 0)
-                                
-                            t0_num[ii] += 1./24.*tau*3/self.N_it*(4.*np.pi)**(3./2.)
-
-                    if 'tauNL-direc' in t:
-                        # Direction-dependent tauNL
-                        n1,n3,n = np.asarray(t.split(':')[1].split(',')).astype(int)
-                        AA_sum = 0.
-                        
-                        # Compute tau from these maps
-                        tmp = 0.
-                        for A_maps_xx, A_maps_xd_sym, this_proc_x_maps in zip([A_maps_aa, A_maps_bb],[A_maps_ad_sym, A_maps_bd_sym],[this_proc_a_maps,this_proc_b_maps]):
-                            for nn in np.unique([n1,n3]):
-                                if nn not in A_maps_xx.keys():
-                                    A_maps_xx[nn] = self._A_maps(this_proc_x_maps, this_proc_x_maps, nn)
-                                    A_maps_xd_sym[nn] = self._A_maps(this_proc_x_maps, proc_maps, nn, add_sym=True)
-                            if n1==n3:
-                                tmp += 2*self._tau_sum(A_maps_xx, A_maps_dd, self.r_weights[t], n1, n3, n)
-                            else:
-                                tmp += self._tau_sum(A_maps_xx,A_maps_dd, self.r_weights[t], n1, n3, n)+self._tau_sum(A_maps_dd, A_maps_xx, self.r_weights[t], n1, n3, n)
-                            tmp += self._tau_sum(A_maps_xd_sym,A_maps_xd_sym, self.r_weights[t], n1, n3, n)
-                                
-                        t2_num[ii] += -1./48.*tmp*6./self.N_it/2.*4. # x4 from dropped perms
-                        
-                        if compute_t0:
-                            # Compute additional (P_nmu*Q)_lm fields
-                            tmp = 0.
-                            for nn in np.unique([n1,n3]):
-                                if nn not in A_maps_ab_sym.keys():
-                                    A_maps_ab_sym[nn] = self._A_maps(this_proc_a_maps, this_proc_b_maps, nn, add_sym=True)
-                            if n1==n3:
-                                tmp += 2*self._tau_sum(A_maps_aa, A_maps_bb, self.r_weights[t], n1, n3, n)
-                            else:
-                                tmp += self._tau_sum(A_maps_aa, A_maps_bb, self.r_weights[t], n1, n3, n)+self._tau_sum(A_maps_bb, A_maps_aa, self.r_weights[t], n1, n3, n)
-                            tmp += self._tau_sum(A_maps_ab_sym, A_maps_ab_sym, self.r_weights[t], n1, n3, n)
-                            
-                            t0_num[ii] += 1./48.*tmp*3/self.N_it*4. # x4 from dropped perms
-                        
-                    if 'tauNL-even' in t:
-                        # Direction-dependent even tauNL
-                        n = int(t.split(':')[1])
-                        tau = 0.
-                        
-                        for A_maps_xx, A_maps_xd_sym, this_proc_x_maps in zip([A_maps_aa, A_maps_bb],[A_maps_ad_sym, A_maps_bd_sym],[this_proc_a_maps,this_proc_b_maps]):
-                            for nn in np.unique([n,0]):
-                                if nn not in A_maps_xx.keys():
-                                    A_maps_xx[nn] = self._A_maps(this_proc_x_maps, this_proc_x_maps, nn)
-                                    A_maps_xd_sym[nn] = self._A_maps(this_proc_x_maps, proc_maps, nn, add_sym=True)
-                            
-                            if n==0:
-                                tau += 6*self._tau_sum(A_maps_xx, A_maps_dd, self.r_weights[t], 0, 0, 0)
-                                tau += 3*self._tau_sum(A_maps_xd_sym, A_maps_xd_sym, self.r_weights[t], 0, 0, 0)
-                            else:    
-                                tau += 2*self._tau_sum(A_maps_xx, A_maps_dd, self.r_weights[t], n, n, 0)
-                                tau += self._tau_sum(A_maps_xd_sym, A_maps_xd_sym, self.r_weights[t], n, n, 0)
-                                tau += 2*(self._tau_sum(A_maps_xx, A_maps_dd, self.r_weights[t], 0, n, n)+self._tau_sum(A_maps_dd, A_maps_xx, self.r_weights[t], 0, n, n))
-                                tau += 2*self._tau_sum(A_maps_xd_sym,A_maps_xd_sym, self.r_weights[t], 0, n, n)
-                        
-                        pref = (-1.)**n/np.sqrt(2.*n+1.)*np.sqrt(4.*np.pi)**3.
-                        t2_num[ii] += -1./48.*tau*pref*6./self.N_it/2.*4./3. # x4 from dropped perms
-
-                        if compute_t0:
-                            # Compute additional (P_nmu*Q)_lm fields
-                            for nn in np.unique([n,0]):
-                                if nn not in A_maps_ab_sym.keys():
-                                    A_maps_ab_sym[nn] = self._A_maps(this_proc_a_maps, this_proc_b_maps, nn, add_sym=True)
-                            if n==0:
-                                tau = 6*self._tau_sum(A_maps_aa, A_maps_bb, self.r_weights[t], 0, 0, 0)
-                                tau += 3*self._tau_sum(A_maps_ab_sym, A_maps_ab_sym, self.r_weights[t], 0, 0, 0)
-                            else:
-                                tau = 2*self._tau_sum(A_maps_aa, A_maps_bb, self.r_weights[t], n, n, 0)
-                                tau += self._tau_sum(A_maps_ab_sym, A_maps_ab_sym, self.r_weights[t], n, n, 0)
-                                tau += 2*(self._tau_sum(A_maps_aa, A_maps_bb, self.r_weights[t], 0, n, n)+self._tau_sum(A_maps_bb, A_maps_aa, self.r_weights[t], 0, n, n))
-                                tau += 2*self._tau_sum(A_maps_ab_sym, A_maps_ab_sym, self.r_weights[t], 0, n, n)
-                            
-                            t0_num[ii] += 1./48.*tau*pref*3./self.N_it*4./3. # x4 from dropped perms
-                    
-                    if 'tauNL-odd' in t:
-                        # Direction-dependent odd tauNL
-                        n = int(t.split(':')[1])
-                        n1n3ns, weights = self._decompose_tauNL_odd(n)
-                        
-                        # Assemble sum for each n1,n3,n combination
-                        tau_sum = 0.
-                        for ind in range(len(n1n3ns)):
-                        
-                            n1, n3, n = n1n3ns[ind]
-                            
-                            for A_maps_xx, A_maps_xd_sym, this_proc_x_maps in zip([A_maps_aa, A_maps_bb],[A_maps_ad_sym, A_maps_bd_sym],[this_proc_a_maps,this_proc_b_maps]):
-                                if n1 not in A_maps_xx.keys():
-                                    A_maps_xx[n1] = self._A_maps(this_proc_x_maps, this_proc_x_maps, n1)
-                                    A_maps_xd_sym[n1] = self._A_maps(this_proc_x_maps, proc_maps, n1, add_sym=True)
-                                if n3 not in A_maps_xx.keys():
-                                    A_maps_xx[n3] = self._A_maps(this_proc_x_maps, this_proc_x_maps, n3)
-                                    A_maps_xd_sym[n3] = self._A_maps(this_proc_x_maps, proc_maps, n3, add_sym=True)
-
-                                if n1==n3:
-                                    tau = 2*self._tau_sum(A_maps_xx, A_maps_dd, self.r_weights[t], n1, n3, n)
-                                else:
-                                    tau = self._tau_sum(A_maps_xx, A_maps_dd, self.r_weights[t], n1, n3, n)+self._tau_sum(A_maps_dd, A_maps_xx, self.r_weights[t], n1, n3, n)
-                                tau += self._tau_sum(A_maps_xd_sym, A_maps_xd_sym, self.r_weights[t], n1, n3, n)
-                                                                    
-                                # Add to output    
-                                tau_sum += weights[ind]*tau
-                        
-                        t2_num[ii] += -1./48.*tau_sum*6./self.N_it/2.*4. # x4 from dropped perms
-
-                        if compute_t0:
-                                
-                            # Assemble sum for each n1,n3,n combination
-                            tau_sum = 0.
-                            for ind in range(len(n1n3ns)):
-                                n1, n3, n = n1n3ns[ind]
-                            
-                                # Compute additional (P_nmu*Q)_lm fields
-                                if n1 not in A_maps_ab_sym.keys():
-                                    A_maps_ab_sym[n1] = self._A_maps(this_proc_a_maps, this_proc_b_maps, n1, add_sym=True)
-                                if n3 not in A_maps_ab_sym.keys():
-                                    A_maps_ab_sym[n3] = self._A_maps(this_proc_a_maps, this_proc_b_maps, n3, add_sym=True)
-                                
-                                if n1==n3:
-                                    tau = 2*self._tau_sum(A_maps_aa, A_maps_bb, self.r_weights[t], n1, n3, n)
-                                else:
-                                    tau = self._tau_sum(A_maps_aa, A_maps_bb, self.r_weights[t], n1, n3, n)+self._tau_sum(A_maps_bb, A_maps_aa, self.r_weights[t], n1, n3, n)
-                                tau += self._tau_sum(A_maps_ab_sym, A_maps_ab_sym, self.r_weights[t], n1, n3, n)
-                                                                    
-                                # Add to output    
-                                tau_sum += weights[ind]*tau
-                            
-                            # Add to t0                              
-                            t0_num[ii] += 1./48.*tau_sum*3./self.N_it*4. # x4 from dropped perms
-
-                    if 'tauNL-light' in t:
-                        # Light particle collider tauNL
-                        s = int(t.split(':')[1].split(',')[0])
-                        nu_s = float(t.split(':')[1].split(',')[1])
-                        
-                        # Compute 2-field term
-                        tau = 0.
-                        for A_maps_xx, A_maps_xd_sym, this_proc_x_maps in zip([A_maps_aa, A_maps_bb],[A_maps_ad_sym, A_maps_bd_sym],[this_proc_a_maps,this_proc_b_maps]):
-                                        
-                            # Compute additional (P^beta_sl*Q)_LM fields
-                            coll_str = 'coll-%d,%.8f,%.8fi'%(s,-1.5+nu_s,0)
-                            if coll_str not in A_maps_xx.keys():
-                                A_maps_xx[coll_str] = self._A_maps(this_proc_x_maps, this_proc_x_maps, s, beta=-1.5+nu_s)
-                            if coll_str not in A_maps_xd_sym.keys():
-                                A_maps_xd_sym[coll_str] = self._A_maps(this_proc_x_maps, proc_maps, s, add_sym=True, beta=-1.5+nu_s)
-                            
-                            # Compute 4-field term
-                            tau += 2*self._tau_sum_collider(A_maps_xx, A_maps_dd, self.r_weights[t], s, -1.5+nu_s)
-                            tau += self._tau_sum_collider(A_maps_xd_sym, A_maps_xd_sym, self.r_weights[t], s, -1.5+nu_s)
-                        
-                        # Integrate over r, r'
-                        t2_num[ii] += -1./24.*tau*6./self.N_it/2.*2. # x2 from dropped perms
-
-                        if compute_t0:
-                            
-                            # Compute additional (P^beta_sl*Q)_LM fields
-                            if coll_str not in A_maps_ab_sym.keys():
-                                A_maps_ab_sym[coll_str] = self._A_maps(this_proc_a_maps, this_proc_b_maps, s, add_sym=True, beta=-1.5+nu_s)
-                            
-                            # Compute 4-field term
-                            tau = 2*self._tau_sum_collider(A_maps_aa, A_maps_bb, self.r_weights[t], s, -1.5+nu_s)
-                            tau += self._tau_sum_collider(A_maps_ab_sym,A_maps_ab_sym, self.r_weights[t], s, -1.5+nu_s)
-                            
-                            # Integrate over r, r'
-                            t0_num[ii] += 1./24.*tau*3/self.N_it*2. # x2 from dropped perms
-
-                    if 'tauNL-heavy' in t:
-                        # Heavy particle collider tauNL
-                        s = int(t.split(':')[1].split(',')[0])
-                        mu_s = float(t.split(':')[1].split(',')[1])
-                        
-                        pos_str = 'coll-%d,%.8f,%.8fi'%(s,-1.5,-1.0*mu_s)
-                        neg_str = 'coll-%d,%.8f,%.8fi'%(s,-1.5,+1.0*mu_s)
-                            
-                        # Compute 2-field term
-                        tau = 0.
-                        for A_maps_xx, A_maps_xd_sym, this_proc_x_maps in zip([A_maps_aa, A_maps_bb],[A_maps_ad_sym, A_maps_bd_sym],[this_proc_a_maps,this_proc_b_maps]):
-                            
-                            # Compute additional (P^beta_sl*Q)_LM fields
-                            if pos_str not in A_maps_xx.keys():
-                                A_maps_xx[pos_str] = self._A_maps(this_proc_x_maps, this_proc_x_maps, s, False, beta=-1.5-1.0j*mu_s)
-                                A_maps_xd_sym[pos_str] = self._A_maps(this_proc_x_maps, proc_maps, s, True, beta=-1.5-1.0j*mu_s)
-                            if neg_str not in A_maps_xx.keys():
-                                A_maps_xx[neg_str] = self._A_maps(this_proc_x_maps, this_proc_x_maps, s, False, beta=-1.5+1.0j*mu_s)
-                                A_maps_xd_sym[neg_str] = self._A_maps(this_proc_x_maps, proc_maps, s, True, beta=-1.5+1.0j*mu_s)
-                            
-                            # Compute 4-field term
-                            tau += 2*self._tau_sum_collider(A_maps_xx, A_maps_dd, self.r_weights[t], s, -1.5-1.0j*mu_s)
-                            tau += self._tau_sum_collider(A_maps_xd_sym,A_maps_xd_sym, self.r_weights[t], s, -1.5-1.0j*mu_s)
-                        
-                        # Integrate over r, r'
-                        t2_num[ii] += -1./24.*tau*6./self.N_it/2.*2. # x2 from dropped perms
-                        
-                        if compute_t0:
-                            
-                            # Compute additional (P^beta_sl*Q)_LM fields
-                            if pos_str not in A_maps_ab_sym.keys():
-                                A_maps_ab_sym[pos_str] = self._A_maps(this_proc_a_maps, this_proc_b_maps, s, True, beta=-1.5-1.0j*mu_s)
-                            if neg_str not in A_maps_ab_sym.keys():
-                                A_maps_ab_sym[neg_str] = self._A_maps(this_proc_a_maps, this_proc_b_maps, s, True, beta=-1.5+1.0j*mu_s)
-                            
-                            # Compute 4-field term
-                            tau = 2*self._tau_sum_collider(A_maps_aa, A_maps_bb, self.r_weights[t], s, -1.5-1.0j*mu_s)
-                            tau += self._tau_sum_collider(A_maps_ab_sym,A_maps_ab_sym, self.r_weights[t], s, -1.5-1.0j*mu_s)
-                            
-                            # Integrate over r, r'
-                            t0_num[ii] += 1./24.*tau*3/self.N_it*2. # x2 from dropped perms
-                        
-                    if t=='lensing':
-                        # Lensing template
-                        Ls = self.base.l_arr[(self.base.l_arr>=self.Lmin_lens)*(self.base.l_arr<=self.Lmax_lens)]
-                        Ms = self.base.m_arr[(self.base.l_arr>=self.Lmin_lens)*(self.base.l_arr<=self.Lmax_lens)]
-
-                        # First set of fields
-                        Phi_aa = self._compute_lensing_Phi(this_proc_a_maps,this_proc_a_maps)
-                        Phi_ad = self._compute_lensing_Phi(this_proc_a_maps,proc_maps,add_sym=True)
-                        Phi_sum = 4.*Phi_aa*Phi_dd.conj()+2.*Phi_ad*Phi_ad.conj()
-                        del Phi_ad
-                        
-                        # Second set of fields
-                        Phi_bb = self._compute_lensing_Phi(this_proc_b_maps,this_proc_b_maps)
-                        Phi_bd = self._compute_lensing_Phi(this_proc_b_maps,proc_maps,add_sym=True)
-                        Phi_sum += 4.*Phi_bb*Phi_dd.conj()+2.*Phi_bd*Phi_bd.conj()
-                        del Phi_bd
-                        
-                        t_init = time.time()
-                        t2_num[ii] += -1./24.*np.sum(Ls*(Ls+1.)*Phi_sum*(1.+(Ms>0))*self.C_phi[Ls]).real*3./self.N_it
-                        self.timers['lensing_summation'] += time.time()-t_init
-               
-                        if compute_t0:
-                            Phi_ab = self._compute_lensing_Phi(this_proc_a_maps,this_proc_b_maps,add_sym=True)
-                            Phi_sum = 4.*Phi_aa*Phi_bb.conj()+2.*Phi_ab*Phi_ab.conj()
-                            del Phi_ab, Phi_aa, Phi_bb
-                            
-                            t_init = time.time()
-                            t0_num[ii] += 1./24.*np.sum(Ls*(Ls+1.)*Phi_sum*(1.+(Ms>0))*self.C_phi[Ls]).real*3./self.N_it
-                            self.timers['lensing_summation'] += time.time()-t_init
-                        del Phi_sum
-                        
-                    if t=='point-source':
-                        t_init = time.time()
-                        
-                        def _return_perm(map12, map34):
-                            return np.sum(map12['u'][0].real**2.*map34['u'][0].real**2.)
-                        
-                        # First set of fields
-                        summ = _return_perm(proc_maps, this_proc_a_maps)
-                        # Second set of fields
-                        summ += _return_perm(proc_maps, this_proc_b_maps)
-                        t2_num[ii] += -3./24.*summ/self.N_it*self.base.A_pix
-
-                        if compute_t0:
-                            summ = _return_perm(this_proc_a_maps, this_proc_b_maps)
-                            t0_num[ii] += 3./24.*summ/self.N_it*self.base.A_pix
-                        self.timers['gNL_summation'] += time.time()-t_init
-
-            # Load t0 from memory, if already computed
-            if not compute_t0:
-                t0_num = self.t0_num
-            else:
-                self.t0_num = t0_num
-
-        if include_disconnected_term:
-            t_num = t4_num+t2_num+t0_num
         else:
-            t_num = t4_num
-
-        return t_num
-
+            self.preload = False
+            if verb: print("No preloading; simulations will be loaded and accessed at runtime.")
+            
+            # Simply save iterator and continue (simulations will be processed in serial later) 
+            if self.ones_mask:
+                self.load_sim_data = lambda ii: self._process_sim([self.base.generate_data(int(1e5)+ii, Cl_input=Cl_input, output_type='harmonic', lmax=self.lmax, deconvolve_beam=False),self.base.generate_data(int(2e5)+ii, Cl_input=Cl_input, output_type='harmonic', deconvolve_beam=False)], input_type='harmonic')
+            else:
+                self.load_sim_data = lambda ii: self._process_sim([self.mask*self.base.generate_data(int(1e5)+ii, Cl_input=Cl_input, deconvolve_beam=False),self.mask*self.base.generate_data(int(2e5)+ii, Cl_input=Cl_input, deconvolve_beam=False)])
+    
+    ### FISHER MATRIX FUNCTIONS
     @_timer_func('fish_outer')
     def _assemble_fish(self, Q4_a, Q4_b, sym=False):
         """Compute Fisher matrix between two Q arrays as an outer product. This is parallelized across the l,m axis."""
@@ -2585,527 +2000,951 @@ class TSpecTemplate():
             # return 0.5*np.sum((np.array([1,-1])[:,None,None]*self.base.to_lm_vec([map123,map123.conj()],spin=1,lmax=self.lmax)).sum(axis=0).T[self.lminfilt,None,:]*flXs*weights,axis=2).T
         else:
             raise Exception(f"Wrong spin s = {spin}!")
+    
+    def _compute_fisher_derivatives(self, templates, N_fish_optim=None, verb=False):
+        """Compute the derivative of the ideal Fisher matrix with respect to the weights for each template of interest."""
+
+        # Output array
+        output = {}
         
-    @_timer_func('fisher')
-    def compute_fisher_contribution(self, seed, verb=False):
+        # Separate out tauNL templates
+        contact_templates = []
+        exchange_templates = []
+        for template in templates:
+            if 'gNL' in template: 
+                contact_templates.append(template)
+            elif 'tauNL' in template:
+                exchange_templates.append(template)
+            else:
+                raise Exception("Template %s not implemented!"%template)
+                
+        # Start with contact templates
+        if len(contact_templates)!=0:
+            # Compute arrays
+            # NB: using exact Gauss-Legendre integration in mu
+            [mus, w_mus] = p_roots(2*self.lmax+1)
+            ls = np.arange(self.lmin,self.lmax+1)
+            legs = np.asarray([lpmn(0,self.lmax,mus[i])[0][0,self.lmin:] for i in range(len(mus))])
+                
+            t_init = time.time()
+            for template in contact_templates:
+                    
+                if template=='gNL-loc':
+                    if verb: print("\tComputing gNL-loc Fisher matrix derivative exactly")
+                    deriv_matrix = np.asarray(fisher_deriv_gNL_loc(self.plLXs[self.nmax], self.qlXs, self.quad_weights_1d, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'), 
+                                        legs, w_mus, self.lmin, self.lmax, self.base.nthreads))
+                    
+                elif template=='gNL-con':
+
+                    if verb: print("\tComputing gNL-con Fisher matrix derivative exactly")
+                    deriv_matrix = np.asarray(fisher_deriv_gNL_con(self.rlXs, self.quad_weights_1d, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'),
+                                        legs, w_mus, self.lmin, self.lmax, self.base.nthreads))
+                
+                elif template=='gNL-dotdot':
+
+                    if verb: print("\tComputing gNL-dotdot Fisher matrix derivative exactly")
+                    deriv_matrix = np.asarray(fisher_deriv_gNL_dotdot(self.alXs, self.rtau_arr[:,1], self.quad_weights_2d, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'), 
+                                            legs, w_mus, self.lmin, self.lmax, self.base.nthreads))
+                
+                elif template=='gNL-dotdel':
+                    
+                    if verb: print("\tComputing gNL-dotdel Fisher matrix derivative exactly")
+                    deriv_matrix = np.asarray(fisher_deriv_gNL_dotdel(self.alXs, self.blXs, self.clXs, self.rtau_arr[:,1], self.quad_weights_2d, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'), 
+                                            legs, mus, w_mus, self.lmin, self.lmax, self.base.nthreads))
+                    
+                elif template=='gNL-deldel':
+                    
+                    if verb: print("\tComputing gNL-deldel Fisher matrix derivative exactly")
+                    deriv_matrix = np.asarray(fisher_deriv_gNL_deldel(self.blXs, self.clXs, self.quad_weights_2d, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'), 
+                                            legs, mus, w_mus, self.lmin, self.lmax, self.base.nthreads))
+                   
+                else:
+                    raise Exception("Template %s not implemented!"%template)
+                    
+                output[template] = np.sum(deriv_matrix), deriv_matrix
+
+            self.timers['analytic_fisher'] += time.time()-t_init
+
+        # Move to tauNL estimators
+        if len(exchange_templates)!=0:
+            
+            # Precompute common terms
+            all_Uinv_lms = []
+            Q_maps = []
+            
+            all_Q4 = {t: [] for t in exchange_templates}
+            init_score = {t: 0 for t in exchange_templates}
+            deriv_matrix = {t: 0 for t in exchange_templates}
+            
+            # Define weight indices
+            inds = np.arange(self.N_r,dtype=np.int32)
+            i_weights = np.ones(self.N_r)*self.quad_weights_1d[inds]
+            d_weights = self.quad_weights_1d[inds]
+        
+            for seed in range(N_fish_optim):
+                
+                print("\nComputing Fisher matrix derivatives from realization %d of %d"%(seed+1, N_fish_optim))
+                
+                # Compute A^-1.a GRF maps 
+                Uinv_a_lms = []
+                for ii in range(2):
+                    t_init = time.time()
+                    a_lm = self.base.generate_data(seed=seed+int((1+ii)*1e9), output_type='harmonic', deconvolve_beam=True)
+                    self.timers['fish_grfs'] += time.time()-t_init
+                    t_init = time.time()
+                    Uinv_a_lms.append(np.asarray(self.base.applyAinv(a_lm, input_type='harmonic')[:,self.lfilt],order='C'))
+                    self.timers['Ainv'] += time.time()-t_init
+                all_Uinv_lms.append(Uinv_a_lms)
+                
+                # Compute Q maps
+                if verb: print("Creating Q maps")
+                Q_maps = np.asarray(self._filter_pair(Uinv_a_lms, 'Q'),dtype=np.float64,order='C')    
+
+                # Compute P maps
+                if verb and len(self.p_inds)>0: print("Creating P_{n,mu} maps")
+                P_maps = self._filter_pair(Uinv_a_lms, 'P')
+                
+                # Compute collider P maps     
+                if verb and len(self.coll_params.keys())>0: print("Creating collider P^beta_{s,lam} maps")
+                coll_P_maps = self._filter_pair(Uinv_a_lms, 'coll-P')
+                
+                def _compute_direc_deriv_single(n1n3ns, weights):
+                    """Compute the idealized directional Fisher matrix derivative for a given random seed."""
+                    
+                    # Compute F_L * [P_{nmu} Q]_LM maps
+                    Q4a_11, Q4b_11, Q4a_1del, Q4b_1del = 0.,0.,0.,0.
+                    for n_it in range(len(n1n3ns)):
+                        n1, n3, n = n1n3ns[n_it]
+                        
+                        F_vecs_all = self._F_PQ(P_maps[n3], Q_maps, i_weights, n1, n3, n, inds=inds)
+                        
+                        # Compute Q4 maps
+                        Qs = self._compute_ideal_Q4(P_maps[n1], Q_maps, F_vecs_all, i_weights, n1=n1, del_weights=d_weights, apply_weighting=True, with_deriv=True, with_deriv_weight=True)
+                        Q4a_11 += weights[n_it]*Qs[0]
+                        Q4b_11 += weights[n_it]*Qs[1]
+                        Q4a_1del += weights[n_it]*Qs[2]
+                        Q4b_1del += weights[n_it]*Qs[3] 
+                        
+                    this_Q4 = [Q4a_11, Q4b_11]
+                    
+                    # Assemble score and derivative
+                    this_score = self._assemble_fish(Q4a_11, Q4b_11, sym=True).ravel()
+                    this_matrix = self._assemble_fish_ideal(Q4a_1del, Q4b_1del, sym=True)
+                    return this_Q4, this_score, this_matrix
+
+                def _compute_coll_deriv_single(beta, s):
+                    """Compute the idealized collider Fisher matrix derivative for a term specified by (complex) beta and spin s for a given random seed."""
+            
+                    # Compute Sum_S C_s(S, i nu_s)F^{-2beta}_L * [P^beta_{sl} Q]_LM maps
+                    Q4a_11, Q4b_11, Q4a_1del, Q4b_1del = 0.,0.,0.,0.
+                    
+                    if np.imag(beta)!=0:
+                        # Compute F_L^beta * [P^beta_{slam} Q]_LM maps
+                        F_vecs_all = self._coll_F_PQ(coll_P_maps[beta,s], Q_maps, i_weights, s, beta, coll_P_maps[np.conj(beta),s], inds=inds) 
+                        
+                        # Compute Q4 maps
+                        Q4a_11, Q4b_11, Q4a_1del, Q4b_1del = self._compute_ideal_Q4(coll_P_maps[beta,s], Q_maps, F_vecs_all, i_weights, s, beta, coll_P_maps[np.conj(beta),s], del_weights=d_weights, apply_weighting=True, with_deriv=True, with_deriv_weight=True)
+                        
+                    else:
+                        # Compute F_L^beta * [P^beta_{slam} Q]_LM maps
+                        F_vecs_all = self._coll_F_PQ(coll_P_maps[beta,s], Q_maps, i_weights, s, beta, inds=inds) 
+                        
+                        # Compute Q4 maps
+                        Q4a_11, Q4b_11, Q4a_1del, Q4b_1del = self._compute_ideal_Q4(coll_P_maps[beta,s], Q_maps, F_vecs_all, i_weights, s, beta, del_weights=d_weights, apply_weighting=True, with_deriv=True, with_deriv_weight=True)
+                        
+                    this_Q4 = [Q4a_11, Q4b_11]
+                    
+                    # Assemble score and derivative
+                    this_score = self._assemble_fish(Q4a_11, Q4b_11, sym=True).ravel()
+                    this_matrix = self._assemble_fish_ideal(Q4a_1del, Q4b_1del, sym=True)
+                    return this_Q4, this_score, this_matrix
+            
+                # Now compute estimator
+                for template in exchange_templates:
+                
+                    if template=='tauNL-loc':
+                        # Local tauNL
+                        if verb: print("Computing tauNL-loc Fisher matrix derivative")
+
+                        # Compute derivative
+                        outs = _compute_direc_deriv_single([[0, 0, 0]], [(4.*np.pi)**1.5]) # add (4pi)^3
+                        
+                    elif 'tauNL-direc' in template:
+                        # Direction-dependent tauNL
+                        n1,n3,n = np.asarray(template.split(':')[1].split(','),dtype=int)
+                        if verb: print("Computing tauNL-direc:(%d,%d,%d) Fisher matrix derivative"%(n1,n3,n))
+               
+                        # Compute derivative
+                        outs = _compute_direc_deriv_single([[n1, n3, n]], [1.])
+                        
+                    elif 'tauNL-even' in template:
+                        # Direction-dependent even tauNL
+                        n = int(template.split(':')[1])
+                        if verb: print("Computing tauNL-even:(%d) Fisher matrix derivative"%n)
+                        
+                        # Compute the decomposition into n1, n3, n pieces
+                        uniq_n1n3ns, uniq_weights = self._decompose_tauNL_even(n)
+                        
+                        # Compute derivative
+                        outs = _compute_direc_deriv_single(uniq_n1n3ns, uniq_weights)
+                        
+                    elif 'tauNL-odd' in template:
+                        # Direction-dependent odd tauNL
+                        n = int(template.split(':')[1])
+                        if verb: print("Computing tauNL-odd:(%d) Fisher matrix derivative"%n)
+
+                        # Compute the decomposition into n1, n3, n pieces                 
+                        uniq_n1n3ns, uniq_weights = self._decompose_tauNL_odd(n)
+                        
+                        # Compute derivative
+                        outs = _compute_direc_deriv_single(uniq_n1n3ns, uniq_weights)                    
+                    
+                    elif 'tauNL-light' in template:
+                        # Light particle collider tauNL
+                        s = int(template.split(':')[1].split(',')[0])
+                        nu_s = float(template.split(':')[1].split(',')[1])
+                        if verb: print("Computing tauNL-light:(%d,%.2f) Fisher matrix derivative"%(s,nu_s))
+                        
+                        # Compute derivative
+                        outs = _compute_coll_deriv_single(-1.5+nu_s, s)
+                        
+                    elif 'tauNL-heavy' in template:
+                        # Heavy particle collider tauNL
+                        s = int(template.split(':')[1].split(',')[0])
+                        mu_s = float(template.split(':')[1].split(',')[1])
+                        if verb: print("Computing tauNL-heavy(%d,%.2f) Fisher matrix derivative"%(s,mu_s))
+                        
+                        # Compute derivative
+                        outs = _compute_coll_deriv_single(-1.5-1.0j*mu_s, s)
+                    
+                    else:
+                        raise Exception("Template %s not implemented!"%template)
+                        
+                    all_Q4[template].append(outs[0])
+                    init_score[template] += outs[1]/N_fish_optim
+                    deriv_matrix[template] += outs[2]/N_fish_optim
+                    
+            # Add to output dictionary
+            for template in exchange_templates:
+                output[template] = init_score[template], deriv_matrix[template], all_Uinv_lms, all_Q4[template]
+            
+        return output
+
+    def _compute_ideal_Q4(self, Pn1_maps, Q_maps, F_vecs, r_weights, n1=0, beta_coll=np.inf, conjPn1_maps=[], del_weights=[], apply_weighting=False, with_deriv=False, with_deriv_weight=False, inds=[]):
         """
-        This computes the contribution to the Fisher matrix from a single pair of GRF simulations, created internally.
+        Assemble and return an array of ideal Q4 maps and derivatives. This is specific to the optimization routines and applies only to exchange trispectra.
+
+
+        The outputs are either Q(b) or S^-1Q(b), or the derivatives.
+        """
+        if len(inds)==0:
+            inds = np.arange(self.N_r, dtype=np.int32)
+        
+        ### Assemble Q4 maps, with relevant symmetries
+        if with_deriv:
+            Q4, dQ4 = self._get_Q4_perms(Pn1_maps, Q_maps, F_vecs, r_weights, n1, beta_coll, conjPn1_maps, with_deriv=True, inds=inds, del_weights=del_weights)
+        else:
+            Q4 = self._get_Q4_perms(Pn1_maps, Q_maps, F_vecs, r_weights, n1, beta_coll, conjPn1_maps, with_deriv=False, inds=inds)
+        Q4 = Q4[:,None,...]
+        
+        # Assemble output
+        output = [Q4.reshape(4,1,-1)]
+        
+        if apply_weighting: 
+            output.append(apply_ideal_weight(Q4, self.Cinv, self.m_weight, self.base.nthreads))
+        
+        if with_deriv:
+            output.append(dQ4.reshape(4,len(inds),-1))
+
+            if with_deriv_weight:
+                output.append(apply_ideal_weight(dQ4, self.Cinv, self.m_weight, self.base.nthreads))
+        
+        return output
+    
+    ### NUMERATOR
+    @_timer_func('numerator')
+    def Tl_numerator(self, data, include_disconnected_term=True, verb=False, input_type='map'):
+        """
+        Compute the numerator of the quasi-optimal trispectrum estimator for all templates, given some data (either in map or harmonic space).
+
+        We can also optionally switch off the disconnected terms, which affects only parity-conserving trispectra.
         """
         # Check we have initialized correctly
         if self.ints_1d and (not hasattr(self,'r_arr')):
             raise Exception("Need to supply radial integration points or run optimize_radial_sampling_1d()!")
         if self.ints_2d and (not hasattr(self,'rtau_arr')):
             raise Exception("Need to supply radial/tau integration points or run optimize_radial_sampling_2d()!")
-
-        print("Computing Fisher matrix with seed %d"%seed)
         
-        # Initialize output
-        fish = np.zeros((len(self.templates),len(self.templates)),dtype='complex')
+        # Check if simulations have been supplied
+        if not hasattr(self, 'preload') and include_disconnected_term:
+            raise Exception("Need to generate or specify bias simulations!")
+        
+        # Check input data format
+        if self.pol:
+            assert len(data)==3, "Data must contain T, Q, U components!"
+        else:
+            assert (len(data)==1 and len(data[0])==self.base.Npix) or len(data)==self.base.Npix, "Data must contain T only!"
 
-        # Compute two random realizations with known power spectrum, removing the beam
-        if verb: print("# Generating GRFs")
+        # Decide whether to compute t0 term, if not already computed
+        if hasattr(self, 't0_num') and include_disconnected_term:
+            compute_t0 = False
+            if verb: print("Using precomputed t0 term")
+        else:
+            compute_t0 = True
+
+        # Apply S^-1 to data and transform to harmonic space
         t_init = time.time()
-        a_maps = []
-        for ii in range(2):
-            if self.ones_mask:
-                a_maps.append(self.base.generate_data(seed=seed+int((1+ii)*1e9), output_type='harmonic',lmax=self.lmax, deconvolve_beam=True))
-            else:
-                # we can't truncate to l<=lmax here, since we need to apply the mask!
-                a_maps.append(self.base.generate_data(seed=seed+int((1+ii)*1e9), output_type='harmonic', deconvolve_beam=True))
-        self.timers['fish_grfs'] += time.time()-t_init
+        h_data_lm = np.asarray(self.applySinv(data, input_type=input_type, lmax=self.lmax)[:,self.lminfilt], order='C')
+        self.timers['Sinv'] += time.time()-t_init
+                
+        # Compute all relevant weighted maps
+        proc_maps = self._apply_all_filters(h_data_lm)
         
-        # Define Q map code
-        def compute_Q4(weighting):
-            """
-            Assemble and return an array of Q4 maps in real- or harmonic-space, for S^-1 or A^-1 weighting. 
-
-            Schematically Q ~ (A[x]B[y,z]_lm + perms., and we dynamically compute each permutation of (A B)_lm.
-
-            The outputs are either Q_i or S^-1.P.Q_i.
-            """
+        # Define 4-, 2- and 0-field arrays
+        t4_num = np.zeros(len(self.templates))
+        A_maps_dd = {}
+        if not include_disconnected_term:
+            print("## No subtraction of (parity-conserving) disconnected terms performed!")
+        else:
+            t2_num = np.zeros(len(self.templates))
+            if compute_t0: t0_num = np.zeros(len(self.templates))
+        
+        if verb: print("# Assembling trispectrum numerator (4-field term)")
+        for ii,t in enumerate(self.templates):
             
-            # Weight maps by S^-1.P or A^-1
-            if verb: print("Weighting maps")
-            
-            t_init = time.time()
-            if weighting=='Sinv':
-                # Compute S^-1.P.a
-                if self.ones_mask:
-                    Uinv_a_lms = [np.asarray(self.applySinv(self.base.beam_lm[:,self.base.l_arr<=self.lmax]*a_lm, input_type='harmonic', lmax=self.lmax)[:,self.lminfilt],order='C') for a_lm in a_maps]
+            if t=='gNL-loc':
+                # gNL local template
+                if verb: print("Computing gNL-loc template")
+                
+                t_init = time.time()
+                t4_num[ii] = 9./100.*self.utils.gnl_loc_sum(self.r_weights[t], proc_maps['p00'], proc_maps['q'])*4.*self.base.A_pix*(4.*np.pi)**(1.5)
+                self.timers['gNL_summation'] += time.time()-t_init
+
+            if t=='gNL-con':
+                # gNL constant template
+                if verb: print("Computing gNL-con template")
+                
+                t_init = time.time()
+                t4_num[ii] = 9./25.*self.utils.gnl_con_sum(self.r_weights[t], proc_maps['r'])*self.base.A_pix
+                self.timers['gNL_summation'] += time.time()-t_init
+
+            if t=='gNL-dotdot':
+                # gNL-dot{pi}^4 EFTI shape
+                if verb: print("Computing gNL-dotdot template")
+                
+                t_init = time.time()
+                t4_num[ii] = 384./25.*self.utils.gnl_dotdot_sum(self.rtau_weights[t], self.rtau_arr[:,1], proc_maps['a'])*self.base.A_pix
+                self.timers['gNL_summation'] += time.time()-t_init
+
+            if t=='gNL-dotdel':
+                # gNL-dot{pi}^2del{pi}^2 EFTI shape
+                if verb: print("Computing gNL-dotdel template")
+                
+                t_init = time.time()
+                t4_num[ii] = 288./325.*self.utils.gnl_dotdel_sum(self.rtau_weights[t], self.rtau_arr[:,1], proc_maps['a'], proc_maps['b'], proc_maps['c'])*12*self.base.A_pix
+                self.timers['gNL_summation'] += time.time()-t_init
+
+            if t=='gNL-deldel':
+                # gNL-del{pi}^4 EFTI shape
+                if verb: print("Computing gNL-deldel template")
+                
+                t_init = time.time()
+                t4_num[ii] = 1728./2575.*self.utils.gnl_deldel_sum(self.rtau_weights[t],proc_maps['b'],proc_maps['c'])*6*self.base.A_pix
+                self.timers['gNL_summation'] += time.time()-t_init
+
+            if t=='tauNL-loc':
+                # tauNL-loc template
+                if verb: print("Computing tauNL-loc template")
+
+                # Compute A maps (unless already computed)
+                if 0 not in A_maps_dd.keys():
+                    A_maps_dd[0] = self._A_maps(proc_maps, proc_maps, 0)
+                
+                # Compute 4-field term (adding factors of Sqrt[4pi] to correct for Y_00 factors]
+                t4_num[ii] = 1./24.*self._tau_sum(A_maps_dd, A_maps_dd, self.r_weights[t], 0, 0, 0)*12.*(4.*np.pi)**(3./2.)
+                
+            if 'tauNL-direc' in t:
+                # Direction-dependent tauNL
+                n1,n3,n = np.asarray(t.split(':')[1].split(',')).astype(int)
+                if verb: print("Computing tauNL-direc(%d,%d,%d) template"%(n1,n3,n))
+                
+                ## Compute 4-field term
+                # Compute A maps (unless already computed)
+                if n1 not in A_maps_dd.keys():
+                    A_maps_dd[n1] = self._A_maps(proc_maps, proc_maps, n1)
+                if n3 not in A_maps_dd.keys():
+                    A_maps_dd[n3] = self._A_maps(proc_maps, proc_maps, n3)
+                
+                # Compute tau from these maps
+                t4_num[ii] = self._tau_sum(A_maps_dd, A_maps_dd, self.r_weights[t], n1, n3, n)/48.*24.
+                
+            if 'tauNL-even' in t:
+                # Direction-dependent tauNL (parity-even)
+                n = int(t.split(':')[1])
+                if verb: print("Computing tauNL-even(%d) template"%n)
+                
+                if n not in A_maps_dd.keys():
+                    A_maps_dd[n] = self._A_maps(proc_maps, proc_maps, n)
+                if 0 not in A_maps_dd.keys():
+                    A_maps_dd[0] = self._A_maps(proc_maps, proc_maps, 0)
+                pref = (-1.)**n*(4.*np.pi)**(3./2.)/np.sqrt(2.*n+1.)
+                if n==0:
+                    tau = 3*self._tau_sum(A_maps_dd, A_maps_dd, self.r_weights[t], 0, 0, 0)
                 else:
-                    Uinv_a_lms = [np.asarray(self.applySinv(self.mask*self.base.to_map(self.base.beam_lm*a_lm), lmax=self.lmax)[:,self.lminfilt],order='C') for a_lm in a_maps]
-                self.timers['Sinv'] += time.time()-t_init
-            elif weighting=='Ainv':
-                # Compute A^-1.a
-                if self.ones_mask:
-                    Uinv_a_lms = [np.asarray(self.base.applyAinv(a_lm, input_type='harmonic', lmax=self.lmax)[:,self.lminfilt],order='C') for a_lm in a_maps]
+                    tau = self._tau_sum(A_maps_dd, A_maps_dd, self.r_weights[t], n, n, 0)
+                    tau += 2*self._tau_sum(A_maps_dd, A_maps_dd, self.r_weights[t], 0, n, n)
+                
+                t4_num[ii] = 1./48.*tau*pref*8.
+                
+            if 'tauNL-odd' in t:
+                # Direction-dependent tauNL (parity-odd)
+                n = int(t.split(':')[1])
+                n1n3ns, weights = self._decompose_tauNL_odd(n)
+                if verb: print("Computing tauNL-odd(%d) template"%n)
+                
+                # Iterate over n1,n3,n combinations
+                tau = 0.
+                for ind in range(len(n1n3ns)):
+                    n1, n3, n = n1n3ns[ind]
+                    
+                    # Compute relevant A maps
+                    if n1 not in A_maps_dd.keys():
+                        A_maps_dd[n1] = self._A_maps(proc_maps, proc_maps, n1)
+                    if n3 not in A_maps_dd.keys():
+                        A_maps_dd[n3] = self._A_maps(proc_maps, proc_maps, n3)
+                
+                    # Compute sum of A pairs
+                    tau += weights[ind]*self._tau_sum(A_maps_dd, A_maps_dd, self.r_weights[t], n1, n3, n)
+                
+                # Assemble 4-field term
+                t4_num[ii] = 1./48.*tau*24.
+                
+            if 'tauNL-light' in t:
+                # Light particle collider tauNL
+                s = int(t.split(':')[1].split(',')[0])
+                nu_s = float(t.split(':')[1].split(',')[1])
+                if verb: print("Computing tauNL-light(%d,%.2f) template"%(s,nu_s))
+                
+                # Compute A maps (unless already computed)
+                coll_str = 'coll-%d,%.8f,%.8fi'%(s,-1.5+nu_s,0)
+                if coll_str not in A_maps_dd.keys():
+                    A_maps_dd[coll_str] = self._A_maps(proc_maps, proc_maps, s, beta=-1.5+nu_s)
+                
+                # Compute 4-field term (internally taking real part)
+                t4_num[ii] = self._tau_sum_collider(A_maps_dd, A_maps_dd, self.r_weights[t], s, -1.5+nu_s)/24.*12.
+                
+            if 'tauNL-heavy' in t:
+                # Heavy particle collider tauNL
+                s = int(t.split(':')[1].split(',')[0])
+                mu_s = float(t.split(':')[1].split(',')[1])
+                if verb: print("Computing tauNL-heavy(%d,%.2f) template"%(s,mu_s))
+                
+                # Compute A maps (unless already computed)
+                pos_str = 'coll-%d,%.8f,%.8fi'%(s,-1.5,-1.0*mu_s)
+                neg_str = 'coll-%d,%.8f,%.8fi'%(s,-1.5,+1.0*mu_s)
+                if pos_str not in A_maps_dd.keys():
+                    A_maps_dd[pos_str] = self._A_maps(proc_maps, proc_maps, s, False, beta=-1.5-1.0j*mu_s)
+                if neg_str not in A_maps_dd.keys():
+                    A_maps_dd[neg_str] = self._A_maps(proc_maps, proc_maps, s, False, beta=-1.5+1.0j*mu_s)
+                
+                # Compute 4-field term (internally taking real part)
+                t4_num[ii] = self._tau_sum_collider(A_maps_dd, A_maps_dd, self.r_weights[t], s, -1.5-1.0j*mu_s)/24.*12.
+                
+            if t=='lensing':
+                # Lensing template
+                if verb: print("Computing lensing template")
+
+                ## Compute estimator
+                Phi_dd = self._compute_lensing_Phi(proc_maps,proc_maps,isw=False)
+                Ls = self.base.l_arr[(self.base.l_arr>=self.Lmin_lens)*(self.base.l_arr<=self.Lmax_lens)]
+                Ms = self.base.m_arr[(self.base.l_arr>=self.Lmin_lens)*(self.base.l_arr<=self.Lmax_lens)]
+                t_init = time.time()
+                t4_num[ii] = 1./24.*np.sum(Ls*(Ls+1.)*Phi_dd*Phi_dd.conj()*(1.+(Ms>0))*self.C_phi[Ls]).real*12.
+                self.timers['lensing_summation'] += time.time()-t_init
+               
+            if t=='isw-lensing':
+                # ISW-Lensing template
+                if verb: print("Computing ISW-lensing template")
+
+                ## Compute estimator
+                Phi_dd_isw = self._compute_lensing_Phi(proc_maps,proc_maps,isw=True)
+                Phi_dd_lens = self._compute_lensing_Phi(proc_maps,proc_maps,isw=False)
+                Ls = self.base.l_arr[(self.base.l_arr>=self.Lmin_lens)*(self.base.l_arr<=self.Lmax_lens)]
+                Ms = self.base.m_arr[(self.base.l_arr>=self.Lmin_lens)*(self.base.l_arr<=self.Lmax_lens)]
+                t_init = time.time()
+                
+                # Compute products
+                Phi_sq =  Phi_dd_isw*Phi_dd_isw.conj()*self.C_lens_weight['TT'][Ls]
+                Phi_sq += 2.*np.real(Phi_dd_lens*Phi_dd_isw.conj())*self.C_Tphi[Ls]
+                t4_num[ii] = 1./24.*np.sum(Ls*(Ls+1.)*Phi_sq*(1.+(Ms>0))).real*12.
+                self.timers['lensing_summation'] += time.time()-t_init
+               
+            if t=='point-source':
+                # Point-source template
+                t_init = time.time()
+                if verb: print("Computing point-source template")
+                t4_num[ii] = 1./24.*np.sum(proc_maps['u'][0].real**4.)*self.base.A_pix
+                self.timers['gNL_summation'] += time.time()-t_init
+            
+        if include_disconnected_term:
+
+            # Iterate over simulations
+            for isim in range(self.N_it):
+                if not compute_t0:
+                    if verb: print("# Assembling 2-field trispectrum numerator for simulation pair %d of %d "%(isim+1,self.N_it))
                 else:
-                    Uinv_a_lms = [np.asarray(self.base.applyAinv(a_lm, input_type='harmonic')[:,self.lfilt],order='C') for a_lm in a_maps]
-                self.timers['Ainv'] += time.time()-t_init 
-            
-            # Filter maps
-            if verb: print("Computing filtered maps")
-            if 'q' in self.to_compute:
-                if verb: print("Creating Q maps")
-                Q_maps = self._filter_pair(Uinv_a_lms, 'Q')   
-            if 'r' in self.to_compute:
-                if verb: print("Creating R maps")
-                R_maps = self._filter_pair(Uinv_a_lms, 'R')
-            if 'a' in self.to_compute:
-                if verb: print("Creating A maps")
-                A_maps = self._filter_pair(Uinv_a_lms, 'A')
-            if 'b' in self.to_compute:
-                if verb: print("Creating B maps")
-                B_maps = self._filter_pair(Uinv_a_lms, 'B')
-            if 'c' in self.to_compute:
-                if verb: print("Creating C maps")
-                C_maps = self._filter_pair(Uinv_a_lms, 'C')
-            if 'u' in self.to_compute:
-                if verb: print("Creating U maps")
-                U_maps = self._filter_pair(Uinv_a_lms, 'U')
-            if 'v' in self.to_compute:
-                if verb: print("Creating V maps")
-                V_maps = self._filter_pair(Uinv_a_lms, 'V')
-            
-            # Compute all P maps
-            if verb and len(self.p_inds)>0: print("Creating P_{n,mu} maps")
-            P_maps = self._filter_pair(Uinv_a_lms, 'P')
-            
-            # Compute all collider P maps
-            if verb and len(self.coll_params.keys())>0: print("Creating collider P^beta_{s,lam} maps")
-            coll_P_maps = self._filter_pair(Uinv_a_lms, 'coll-P')
-            
-            # Define output arrays (Q111, Q222, Q112, Q122)
-            Qs = np.zeros((4,len(self.templates),1+2*self.pol,np.sum(self.lfilt)),dtype=np.complex128,order='C')
-            
-            # Helper functions
-            def _add_to_Q(n1,n3,n,w):
-                """Process a given (n1,n3,n) triplet and add it to the tauNL Q-derivative. This takes also a weight w."""
-                
-                # Compute F_L * [P_{nmu} Q]_LM maps
-                F_vecs = self._F_PQ(P_maps[n3], Q_maps, self.r_weights[t], n1, n3, n)
-                
-                # Compute Q4 maps
-                Qs[:,ii] += w*self._get_Q4_perms(P_maps[n1], Q_maps, F_vecs, self.r_weights[t], n1)
-                
-            def _add_to_Q_coll(beta, s):
-                """Process a given collider field and add it to the tauNL Q-derivative."""
-                
-                # Compute Sum_S C_s(S, i nu_s)F^{-2beta}_L * [P^beta_{sl} Q]_LM maps
-                if np.imag(beta)!=0:
-                    
-                    # Compute F_L^beta * [P^beta_{slam} Q]_LM maps
-                    F_vecs = self._coll_F_PQ(coll_P_maps[beta,s], Q_maps, self.r_weights[t], s, beta, conjPs_maps=coll_P_maps[np.conj(beta),s]) 
-                    
-                    # Compute Q4 maps
-                    Qs[:,ii] += self._get_Q4_perms(coll_P_maps[beta,s], Q_maps, F_vecs, self.r_weights[t], s, beta, conjPn1_maps=coll_P_maps[np.conj(beta),s])
-                    
+                    if verb: print("# Assembling 2-field and 0-field trispectrum numerator for simulation pair %d of %d"%(isim+1,self.N_it))
+
+                # Load processed bias simulations
+                if self.preload:
+                    this_proc_a_maps = self.proc_a_maps[isim]
+                    this_proc_b_maps = self.proc_b_maps[isim]
                 else:
-                    # Compute F_L^beta * [P^beta_{slam} Q]_LM maps
-                    F_vecs = self._coll_F_PQ(coll_P_maps[beta,s], Q_maps, self.r_weights[t], s, beta) 
-                    
-                    # Compute Q4 maps
-                    Qs[:,ii] += self._get_Q4_perms(coll_P_maps[beta,s], Q_maps, F_vecs, self.r_weights[t], s, beta)
-                    
-            # Compute products (with symmetries)
-            for ii,t in enumerate(self.templates):
+                    this_proc_a_maps, this_proc_b_maps = self.load_sim_data(isim)
                 
-                if t=='gNL-loc':
-                    
-                    if verb: print("Computing Q-derivative for gNL-loc")
-                    P0_maps = P_maps[0][:,0]*np.sqrt(4.*np.pi)
-                    
-                    # 111 
-                    Qs[0,ii]  = 162./25.*self._transform_maps(self.utils.multiply(P0_maps[0],P0_maps[0],Q_maps[0]),
-                                                              self.plLXs[self.nmax],self.r_weights[t])
-                    Qs[0,ii] += 54./25.*self._transform_maps(self.utils.multiply(P0_maps[0],P0_maps[0],P0_maps[0]),
-                                                             self.qlXs,self.r_weights[t])
+                # Define empty exchange dictionaries
+                A_maps_aa = {}
+                A_maps_ab_sym = {}
+                A_maps_bb = {}
+                A_maps_ad_sym = {}
+                A_maps_bd_sym = {}
 
-                    # 222
-                    Qs[1,ii]  = 162./25.*self._transform_maps(self.utils.multiply(P0_maps[1],P0_maps[1],Q_maps[1]),
-                                                              self.plLXs[self.nmax],self.r_weights[t])
-                    Qs[1,ii] += 54./25.*self._transform_maps(self.utils.multiply(P0_maps[1],P0_maps[1],P0_maps[1]),
-                                                             self.qlXs,self.r_weights[t])
-
-                    # 112
-                    Qs[2,ii]  = 54./25.*self._transform_maps(self.utils.multiply_asym(P0_maps[0],P0_maps[1],Q_maps[0],Q_maps[1]),
-                                                             self.plLXs[self.nmax],self.r_weights[t])
-                    Qs[2,ii] += 54./25.*self._transform_maps(self.utils.multiply(P0_maps[0],P0_maps[0],P0_maps[1]),
-                                                             self.qlXs,self.r_weights[t])
-
-                    # 122
-                    Qs[3,ii]  = 54./25.*self._transform_maps(self.utils.multiply_asym(P0_maps[1],P0_maps[0],Q_maps[1], Q_maps[0]),
-                                                             self.plLXs[self.nmax],self.r_weights[t])
-                    Qs[3,ii] += 54./25.*self._transform_maps(self.utils.multiply(P0_maps[0],P0_maps[1],P0_maps[1]),
-                                                             self.qlXs,self.r_weights[t])
-
-                if t=='gNL-con':
-                    if verb: print("Computing Q-derivative for gNL-con")
+                # Compute templates
+                for ii,t in enumerate(self.templates):
                     
-                    # Compute all fields 
-                    Qs[0,ii]  = 216./25.*self._transform_maps(self.utils.multiply(R_maps[0],R_maps[0],R_maps[0]),
-                                                              self.rlXs,self.r_weights[t])
-                    Qs[1,ii]  = 216./25.*self._transform_maps(self.utils.multiply(R_maps[1],R_maps[1],R_maps[1]),
-                                                              self.rlXs,self.r_weights[t])
-                    Qs[2,ii]  = 216./25.*self._transform_maps(self.utils.multiply(R_maps[0],R_maps[0],R_maps[1]),
-                                                              self.rlXs,self.r_weights[t])
-                    Qs[3,ii]  = 216./25.*self._transform_maps(self.utils.multiply(R_maps[0],R_maps[1],R_maps[1]),
-                                                              self.rlXs,self.r_weights[t])
-                
-                if t=='gNL-dotdot':
-                    if verb: print("Computing Q-derivative for gNL-dotdot")
-                    
-                    # Compute all fields 
-                    Qs[0,ii]  = 9216./25.*self._transform_maps(self.utils.multiply(A_maps[0],A_maps[0],A_maps[0]),
-                                                               self.alXs*self.rtau_arr[:,1][None,None,:]**4,self.rtau_weights[t])
-                    Qs[1,ii]  = 9216./25.*self._transform_maps(self.utils.multiply(A_maps[1],A_maps[1],A_maps[1]),
-                                                               self.alXs*self.rtau_arr[:,1][None,None,:]**4,self.rtau_weights[t])
-                    Qs[2,ii]  = 9216./25.*self._transform_maps(self.utils.multiply(A_maps[0],A_maps[0],A_maps[1]),
-                                                               self.alXs*self.rtau_arr[:,1][None,None,:]**4,self.rtau_weights[t])
-                    Qs[3,ii]  = 9216./25.*self._transform_maps(self.utils.multiply(A_maps[0],A_maps[1],A_maps[1]),
-                                                               self.alXs*self.rtau_arr[:,1][None,None,:]**4,self.rtau_weights[t])
-                
-                if t=='gNL-dotdel':
-                    if verb: print("Computing Q-derivative for gNL-dotdel")
-                    
-                    # 111 
-                    Qs[0,ii]  = 41472./325.*self._transform_maps(self.utils.multiplyCC(A_maps[0],B_maps[0],C_maps[0]),
-                                                                   self.alXs*self.rtau_arr[:,1][None,None,:]**2.,self.rtau_weights[t])
-                    Qs[0,ii] += 41472./325.*self._transform_maps(self.utils.multiply(A_maps[0],A_maps[0],B_maps[0]),
-                                                                   self.blXs*self.rtau_arr[:,1][None,None,:]**2.,self.rtau_weights[t])
-                    Qs[0,ii] += 41472./325.*self._transform_maps(self.utils.multiplyC(A_maps[0],A_maps[0],C_maps[0]),
-                                                                   self.clXs*self.rtau_arr[:,1][None,None,:]**2.,self.rtau_weights[t],spin=1)
-                    
-                    # 222
-                    Qs[1,ii]  = 41472./325.*self._transform_maps(self.utils.multiplyCC(A_maps[1],B_maps[1],C_maps[1]),
-                                                                   self.alXs*self.rtau_arr[:,1][None,None,:]**2.,self.rtau_weights[t])
-                    Qs[1,ii] += 41472./325.*self._transform_maps(self.utils.multiply(A_maps[1],A_maps[1],B_maps[1]),
-                                                                   self.blXs*self.rtau_arr[:,1][None,None,:]**2.,self.rtau_weights[t])
-                    Qs[1,ii] += 41472./325.*self._transform_maps(self.utils.multiplyC(A_maps[1],A_maps[1],C_maps[1]),
-                                                                   self.clXs*self.rtau_arr[:,1][None,None,:]**2.,self.rtau_weights[t],spin=1)
-                    
-                    # 112
-                    Qs[2,ii]  = 13824./325.*self._transform_maps(self.utils.multiplyCC_asym(A_maps[0],A_maps[1],B_maps[0],B_maps[1],C_maps[0],C_maps[1]),
-                                                                   self.alXs*self.rtau_arr[:,1][None,None,:]**2.,self.rtau_weights[t])
-                    Qs[2,ii] += 13824./325.*self._transform_maps(self.utils.multiply_asym(A_maps[0],A_maps[1],B_maps[0], B_maps[1]),
-                                                                   self.blXs*self.rtau_arr[:,1][None,None,:]**2.,self.rtau_weights[t])
-                    Qs[2,ii] += 13824./325.*self._transform_maps(self.utils.multiplyC_asym(A_maps[0],A_maps[1],C_maps[0],C_maps[1]),
-                                                                   self.clXs*self.rtau_arr[:,1][None,None,:]**2.,self.rtau_weights[t],spin=1)
-                    
-                    # 122
-                    Qs[3,ii]  = 13824./325.*self._transform_maps(self.utils.multiplyCC_asym(A_maps[1],A_maps[0],B_maps[1],B_maps[0],C_maps[1],C_maps[0]),
-                                                                   self.alXs*self.rtau_arr[:,1][None,None,:]**2.,self.rtau_weights[t])
-                    Qs[3,ii] += 13824./325.*self._transform_maps(self.utils.multiply_asym(A_maps[1],A_maps[0],B_maps[1],B_maps[0]),
-                                                                   self.blXs*self.rtau_arr[:,1][None,None,:]**2.,self.rtau_weights[t])
-                    Qs[3,ii] += 13824./325.*self._transform_maps(self.utils.multiplyC_asym(A_maps[1],A_maps[0],C_maps[1],C_maps[0]),
-                                                                   self.clXs*self.rtau_arr[:,1][None,None,:]**2.,self.rtau_weights[t],spin=1)
-                    
-                if t=='gNL-deldel':
-                    if verb: print("Computing Q-derivative for gNL-deldel")
-                    
-                    # Precompute useful quantities
-                    quad_11 = self.utils.multiply2(B_maps[0],B_maps[0],C_maps[0],C_maps[0])
-                    quad_12 = self.utils.multiply2(B_maps[0],B_maps[1],C_maps[0],C_maps[1])
-                    quad_22 = self.utils.multiply2(B_maps[1],B_maps[1],C_maps[1],C_maps[1])
-                    
-                    # 111
-                    Qs[0,ii]  = 248772./2575.*self._transform_maps(self.utils.multiply2R(B_maps[0],quad_11),
-                                                                   self.blXs,self.rtau_weights[t])
-                    Qs[0,ii] += 248772./2575.*self._transform_maps(self.utils.multiply2C(C_maps[0],quad_11),
-                                                                   self.clXs,self.rtau_weights[t],spin=1)
-                    
-                    # 222
-                    Qs[1,ii]  = 248772./2575.*self._transform_maps(self.utils.multiply2R(B_maps[1],quad_22),
-                                                                   self.blXs,self.rtau_weights[t])
-                    Qs[1,ii] += 248772./2575.*self._transform_maps(self.utils.multiply2C(C_maps[1],quad_22),
-                                                                   self.clXs,self.rtau_weights[t],spin=1)
-                    
-                    # 112 
-                    Qs[2,ii]  = 82944./2575.*self._transform_maps(self.utils.multiply2R(B_maps[1],quad_11),
-                                                                  self.blXs,self.rtau_weights[t])
-                    Qs[2,ii] += 82944./2575.*self._transform_maps(self.utils.multiply2C(C_maps[1],quad_11),
-                                                                  self.clXs,self.rtau_weights[t],spin=1)
-                    Qs[2,ii] += 165888./2575.*self._transform_maps(self.utils.multiply2R(B_maps[0],quad_12),
-                                                                   self.blXs,self.rtau_weights[t])
-                    Qs[2,ii] += 165888./2575.*self._transform_maps(self.utils.multiply2C(C_maps[0],quad_12),
-                                                                   self.clXs,self.rtau_weights[t],spin=1)
-                    
-                    # 122
-                    Qs[3,ii]  = 82944./2575.*self._transform_maps(self.utils.multiply2R(B_maps[0],quad_22),
-                                                                  self.blXs,self.rtau_weights[t])
-                    Qs[3,ii] += 82944./2575.*self._transform_maps(self.utils.multiply2C(C_maps[0],quad_22),
-                                                                  self.clXs,self.rtau_weights[t],spin=1)
-                    Qs[3,ii] += 165888./2575.*self._transform_maps(self.utils.multiply2R(B_maps[1],quad_12),
-                                                                   self.blXs,self.rtau_weights[t])
-                    Qs[3,ii] += 165888./2575.*self._transform_maps(self.utils.multiply2C(C_maps[1],quad_12),
-                                                                   self.clXs,self.rtau_weights[t],spin=1)
-                    
-                if t=='tauNL-loc':
-                    # Local tauNL
-                    if verb: print("Computing Q-derivative for tauNL-loc")
-                    
-                    # Add to output array, including all permutations and weighting by (4pi)^{3/2} to correct for different conventions
-                    _add_to_Q(0,0,0,(4.*np.pi)**1.5)
-                    
-                if 'tauNL-direc' in t:
-                    # Direction-dependent tauNL
-                    n1,n3,n = np.asarray(t.split(':')[1].split(',')).astype(int)
-                    if verb: print("Computing Q-derivative for tauNL-direc(%d,%d,%d)"%(n1,n3,n))
-                    
-                    # Add to output array, incorporating symmetries
-                    if n1==n3:
-                        _add_to_Q(n1, n3, n, 1.)
-                    else:
-                        _add_to_Q(n1, n3, n, 0.5)
-                        _add_to_Q(n3, n1, n, 0.5*(-1.)**(n1+n3))
+                    if t=='gNL-loc':
+                        t_init = time.time()
                         
-                if 'tauNL-even' in t:
-                    # Direction-dependent even tauNL
-                    n = int(t.split(':')[1])
-                    if verb: print("Computing Q-derivative for tauNL-even(%d)"%n)
-                    
-                    # Compute the decomposition into n1, n3, n pieces
-                    uniq_n1n3ns, uniq_weights = self._decompose_tauNL_even(n)
-                    
-                    # Add to output array for each choice of (n1,n3,n), including symmetries
-                    for n_it in range(len(uniq_n1n3ns)):
-                        n1,n3,n = uniq_n1n3ns[n_it]
-                        if n1==n3:
-                            _add_to_Q(n1, n3, n, uniq_weights[n_it])
-                        else:
-                            _add_to_Q(n1, n3, n, 0.5*uniq_weights[n_it])
-                            _add_to_Q(n3, n1, n, 0.5*(-1.)**(n1+n3)*uniq_weights[n_it])
-                    
-                if 'tauNL-odd' in t:
-                    # Direction-dependent odd tauNL
-                    n = int(t.split(':')[1])
-                    if verb: print("Computing Q-derivative for tauNL-odd(%d)"%n)
-                    
-                    # Compute the decomposition into n1, n3, n pieces
-                    uniq_n1n3ns, uniq_weights = self._decompose_tauNL_odd(n)
-                    
-                    # Add to output array for each choice of (n1,n3,n)
-                    for n_it in range(len(uniq_n1n3ns)):
-                        n1,n3,n = uniq_n1n3ns[n_it]
-                        if n1==n3:
-                            _add_to_Q(n1, n3, n, uniq_weights[n_it])
-                        else:
-                            _add_to_Q(n1, n3, n, 0.5*uniq_weights[n_it])
-                            _add_to_Q(n3, n1, n, 0.5*(-1.)**(n1+n3)*uniq_weights[n_it])
-                
-                if 'tauNL-light' in t:
-                    # Light particle collider tauNL
-                    s = int(t.split(':')[1].split(',')[0])
-                    nu_s = float(t.split(':')[1].split(',')[1])
-                    if verb: print("Computing Q-derivative for tauNL-light(%d,%.2f)"%(s,nu_s))
-                    
-                    # Add to output array
-                    _add_to_Q_coll(-1.5+nu_s,s)
-                    
-                if 'tauNL-heavy' in t:
-                    # Heavy particle collider tauNL
-                    s = int(t.split(':')[1].split(',')[0])
-                    mu_s = float(t.split(':')[1].split(',')[1])
-                    if verb: print("Computing Q-derivative for tauNL-heavy(%d,%.2f)"%(s,mu_s))
-                    
-                    # Add to output array (only one conjugate needed here!)
-                    _add_to_Q_coll(-1.5-1.0j*mu_s,s)
-                    
-                if t=='lensing':
-                    # Lensing A_lens estimator
-                    fields1 = {'u':U_maps[0],'v':V_maps[0]}
-                    fields2 = {'u':U_maps[1],'v':V_maps[1]}
-                    if verb: print("Computing Q-derivative for lensing")
-                    
-                    def _compute_lensing_W(maps1,maps2,add_sym=False):
-                        tmp_lm = np.zeros(len(self.Lminfilt_lens),dtype=np.complex128)
-                        tmp_lm[self.Lminfilt_lens] = Ls*(Ls+1.)*self._compute_lensing_Phi(maps1,maps2,add_sym=add_sym)*self.C_phi[Ls]
-                        return self.base.to_map_spin(tmp_lm,-tmp_lm,spin=1,lmax=self.Lmax_lens)[0]
+                        def _return_perm(map12, map34):
+                            return self.utils.gnl_loc_disc_sum(self.r_weights[t], map12['p00'], map34['p00'], map12['q'], map34['q'])
                         
-                    # Compute all W maps
-                    Ls = self.base.l_arr[(self.base.l_arr>=self.Lmin_lens)*(self.base.l_arr<=self.Lmax_lens)]
-                    W_11 = _compute_lensing_W(fields1,fields1)
-                    W_12sym = _compute_lensing_W(fields1,fields2,add_sym=True)
-                    W_22 = _compute_lensing_W(fields2,fields2)
-                    
-                    def _get_Q(fields,W_maps):
+                        # First set of fields
+                        summ  = _return_perm(proc_maps, this_proc_a_maps)
+                        # Second set of fields
+                        summ += _return_perm(proc_maps, this_proc_b_maps)
+                        t2_num[ii] += -54./100.*summ/self.N_it*self.base.A_pix*(4.*np.pi)**(1.5)
+
+                        if compute_t0:
+                            summ  = _return_perm(this_proc_a_maps, this_proc_b_maps)
+                            t0_num[ii] += 54./100.*summ/self.N_it*self.base.A_pix*(4.*np.pi)**(1.5)
+                        self.timers['gNL_summation'] += time.time()-t_init
+
+                    if t=='gNL-con':
+                        t_init = time.time()
                         
-                        Qlm = np.zeros((1+2*self.pol,np.sum(self.lfilt)),dtype=np.complex128)
-                        ls = self.ls
-                        lpref0 = 0.5*np.sqrt(ls*(ls+1.))
-                        Cl_TTs = self.C_lens_weight['TT'][ls]
-                        if self.pol:
-                            lprefp1 = 0.25*np.sqrt((ls+2.)*(ls-1.))
-                            lprefm1 = 0.25*np.sqrt((ls-2.)*(ls+3.))
-                            Cl_TEs = self.C_lens_weight['TE'][ls]
-                            Cl_EEs = self.C_lens_weight['EE'][ls]
-                            Cl_BBs = self.C_lens_weight['BB'][ls]
+                        def _return_perm(map12, map34):
+                            return self.utils.gnl_con_disc_sum(self.r_weights[t], map12['r'], map34['r'])
+                        
+                        # First set of fields
+                        summ = _return_perm(proc_maps, this_proc_a_maps)
+                        # Second set of fields
+                        summ += _return_perm(proc_maps, this_proc_b_maps)
+                        t2_num[ii] += -27./25.*summ/self.N_it*self.base.A_pix
+
+                        if compute_t0:
+                            summ = _return_perm(this_proc_a_maps, this_proc_b_maps)
+                            t0_num[ii] += 27./25.*summ/self.N_it*self.base.A_pix
+                        self.timers['gNL_summation'] += time.time()-t_init
+
+                    if t=='gNL-dotdot':
+                        t_init = time.time()
+                        
+                        def _return_perm(map12,map34):
+                            return self.utils.gnl_dotdot_disc_sum(self.rtau_weights[t], self.rtau_arr[:,1], map12['a'], map34['a'])
+                        
+                        # First set of fields
+                        summ  = _return_perm(proc_maps, this_proc_a_maps)
+                        # Second set of fields
+                        summ += _return_perm(proc_maps, this_proc_b_maps)
+                        t2_num[ii] += -1152./25.*summ/self.N_it*self.base.A_pix
+                        
+                        if compute_t0:
+                            summ  = _return_perm(this_proc_a_maps, this_proc_b_maps)
+                            t0_num[ii] += 1152./25.*summ/self.N_it*self.base.A_pix
+                        self.timers['gNL_summation'] += time.time()-t_init
+
+                    if t=='gNL-dotdel':
+                        t_init = time.time()
+                        
+                        def _return_perm(map1,map2,map3,map4):
+                            return self.utils.gnl_dotdel_disc_sum(self.rtau_weights[t], self.rtau_arr[:,1], map1['a'],map2['a'],map3['b'],map4['b'],map3['c'],map4['c'])
+                        
+                        # First set of fields
+                        summ  = 2*_return_perm(this_proc_a_maps,this_proc_a_maps,proc_maps,proc_maps)
+                        summ += 8*_return_perm(this_proc_a_maps,proc_maps,this_proc_a_maps,proc_maps)
+                        summ += 2*_return_perm(proc_maps,proc_maps,this_proc_a_maps,this_proc_a_maps)
+                        # Second set of fields
+                        summ += 2*_return_perm(this_proc_b_maps,this_proc_b_maps,proc_maps,proc_maps)
+                        summ += 8*_return_perm(this_proc_b_maps,proc_maps,this_proc_b_maps,proc_maps)
+                        summ += 2*_return_perm(proc_maps,proc_maps,this_proc_b_maps,this_proc_b_maps)
+                        t2_num[ii] += -864./325.*summ/self.N_it*self.base.A_pix
+
+                        if compute_t0:
+                            summ  = 2*_return_perm(this_proc_a_maps,this_proc_a_maps,this_proc_b_maps,this_proc_b_maps)
+                            summ += 8*_return_perm(this_proc_a_maps,this_proc_b_maps,this_proc_a_maps,this_proc_b_maps)
+                            summ += 2*_return_perm(this_proc_b_maps,this_proc_b_maps,this_proc_a_maps,this_proc_a_maps)
+                            t0_num[ii] += 864./325.*summ/self.N_it*self.base.A_pix
+                        self.timers['gNL_summation'] += time.time()-t_init
+                        
+                    if t=='gNL-deldel':
+                        t_init = time.time()
+                        
+                        ## Sum over 4 permutations
+                        
+                        def _return_perm(map1,map2,map3,map4):
+                            return self.utils.gnl_deldel_disc_sum(self.rtau_weights[t], map1['b'], map2['b'], map3['b'], map4['b'], map1['c'], map2['c'], map3['c'], map4['c'])
                             
-                        ## Compute first term
-                        # Spin-0
-                        input_map = np.real(fields['v'][0]*W_maps)
-                        Qlm[0] = -self.base.to_lm([input_map],lmax=self.lmax)[0][self.lminfilt]
+                        # First set of fields
+                        summ =  2*_return_perm(this_proc_a_maps,this_proc_a_maps,proc_maps,proc_maps)
+                        summ += 4*_return_perm(this_proc_a_maps,proc_maps,this_proc_a_maps,proc_maps)
+                        # Second set of fields
+                        summ += 2*_return_perm(this_proc_b_maps,this_proc_b_maps,proc_maps,proc_maps)
+                        summ += 4*_return_perm(this_proc_b_maps,proc_maps,this_proc_b_maps,proc_maps)
+                        t2_num[ii] += -5184./2575.*summ/self.N_it*self.base.A_pix
+
+                        if compute_t0:
+                            ## Sum over 4 permutations
+                            summ =  2*_return_perm(this_proc_a_maps,this_proc_a_maps,this_proc_b_maps,this_proc_b_maps)
+                            summ += 4*_return_perm(this_proc_a_maps,this_proc_b_maps,this_proc_a_maps,this_proc_b_maps)
+                            t0_num[ii] += 5184./2575.*summ/self.N_it*self.base.A_pix
+                        self.timers['gNL_summation'] += time.time()-t_init
+
+                    if t=='tauNL-loc':
                         
-                        if self.pol:
-                            # Spin>0
-                            input_map = fields['v'][1]*W_maps-fields['v'][2]*W_maps.conj()
-                            lm_map_plus, lm_map_minus = self.base.to_lm_spin(input_map,input_map.conj(),spin=2,lmax=self.lmax)[:,self.lminfilt]
-                            Qlm[1] = -0.25*(lm_map_plus+lm_map_minus)
-                            Qlm[2] = 0.25j*(lm_map_plus-lm_map_minus)
-                                   
-                        ## Compute second term
-                        # Z = T
-                        input_map = fields['u'][0]*W_maps
-                        tmp_lm_plus = np.sum(np.array([1,-1])[:,None]*self.base.to_lm_spin(input_map, input_map.conj(),spin=1,lmax=self.lmax),axis=0)[self.lminfilt]
-                        # add to X = T
-                        Qlm[0] += lpref0*Cl_TTs*tmp_lm_plus
-                        if self.pol:
-                            # also add to X = E
-                            Qlm[1] += lpref0*Cl_TEs*tmp_lm_plus
-                        # Z = E
-                        if self.pol:
-                            # lam=+1
-                            input_map = -fields['u'][1]*W_maps.conj()
-                            tmp_lm_plus, tmp_lm_minus = self.base.to_lm_spin(input_map,input_map.conj(),spin=1,lmax=self.lmax)[:,self.lminfilt]
-                            base = lprefp1*(tmp_lm_plus-tmp_lm_minus)
-                            Qlm[0] += Cl_TEs*base
-                            Qlm[1] += Cl_EEs*base
-                            Qlm[2] += lprefp1*(-1.0j)*Cl_BBs*(tmp_lm_plus+tmp_lm_minus)
-                            # lam=-1
-                            input_map = fields['u'][1]*W_maps
-                            tmp_lm_plus, tmp_lm_minus = self.base.to_lm_spin(input_map,input_map.conj(),spin=3,lmax=self.lmax)[:,self.lminfilt]
-                            base = lprefm1*(tmp_lm_plus-tmp_lm_minus)
-                            Qlm[0] += Cl_TEs*base
-                            Qlm[1] += Cl_EEs*base
-                            Qlm[2] += lprefm1*(-1.0j)*Cl_BBs*(tmp_lm_plus+tmp_lm_minus)    
-                        # Z = B
-                        if self.pol:
-                            # lam=+1
-                            input_map = -fields['u'][2]*W_maps.conj()
-                            tmp_lm_plus, tmp_lm_minus = self.base.to_lm_spin(input_map,input_map.conj(),spin=1,lmax=self.lmax)[:,self.lminfilt]
-                            base = lprefp1*1.0j*(tmp_lm_plus+tmp_lm_minus)
-                            Qlm[0] += Cl_TEs*base
-                            Qlm[1] += Cl_EEs*base
-                            Qlm[2] += lprefp1*Cl_BBs*(tmp_lm_plus-tmp_lm_minus)
-                            # lam=-1
-                            input_map = fields['u'][2]*W_maps
-                            tmp_lm_plus, tmp_lm_minus = self.base.to_lm_spin(input_map,input_map.conj(),spin=3,lmax=self.lmax)[:,self.lminfilt]
-                            base = lprefm1*1.0j*(tmp_lm_plus+tmp_lm_minus)
-                            Qlm[0] += Cl_TEs*base
-                            Qlm[1] += Cl_EEs*base
-                            Qlm[2] += lprefm1*Cl_BBs*(tmp_lm_plus-tmp_lm_minus)
+                        # First set of fields
+                        if 0 not in A_maps_aa.keys():
+                            A_maps_aa[0] = self._A_maps(this_proc_a_maps,this_proc_a_maps, 0)
+                            A_maps_ad_sym[0] = self._A_maps(this_proc_a_maps, proc_maps, 0, add_sym=True)
+                        tau  = 4*self._tau_sum(A_maps_aa,A_maps_dd, self.r_weights[t], 0, 0, 0)
+                        tau += 2*self._tau_sum(A_maps_ad_sym,A_maps_ad_sym, self.r_weights[t], 0, 0, 0)
                         
-                        return Qlm/2. # halving to get correct symmetries later
-                    
-                    ### Assemble outputs
-                    # 111
-                    Qs[0,ii] += 12*_get_Q(fields1, W_11)
-                    
-                    # 222
-                    Qs[1,ii] += 12*_get_Q(fields2, W_22)
-                    
-                    # 112
-                    Qs[2,ii] += 4*_get_Q(fields1, W_12sym)
-                    Qs[2,ii] += 4*_get_Q(fields2, W_11)
+                        # Second set of fields
+                        if 0 not in A_maps_bb.keys():
+                            A_maps_bb[0] = self._A_maps(this_proc_b_maps,this_proc_b_maps, 0)
+                            A_maps_bd_sym[0] = self._A_maps(this_proc_b_maps, proc_maps, 0, add_sym=True)
+                        tau += 4*self._tau_sum(A_maps_bb,A_maps_dd, self.r_weights[t], 0, 0, 0)
+                        tau += 2*self._tau_sum(A_maps_bd_sym,A_maps_bd_sym, self.r_weights[t], 0, 0, 0)
+                        
+                        t2_num[ii] += -1./24.*tau*6/self.N_it/2.*(4.*np.pi)**(3./2.)
 
-                    # 122
-                    Qs[3,ii] += 4*_get_Q(fields2, W_12sym)
-                    Qs[3,ii] += 4*_get_Q(fields1, W_22)
-                    
-                    del fields1, fields2, W_11, W_22, W_12sym
-                
-                if t=='point-source':
-                    if verb: print("Computing Q-derivative for point sources")
-                    
-                    def point_source_Q(product_map):
-                        # Output array
-                        q = np.zeros((1+2*self.pol,np.sum(self.lminfilt)),dtype=np.complex128,order='C')
-                        # Fill X=T element only!
-                        q[0] = self.base.to_lm(product_map[None].real,lmax=self.lmax)[0,self.lminfilt]
-                        return q
+                        if compute_t0:
+                            # Compute additional (P*Q)_lm fields
+                            if 0 not in A_maps_ab_sym.keys():
+                                A_maps_ab_sym[0] = self._A_maps(this_proc_a_maps, this_proc_b_maps, 0, add_sym=True)
+                            tau  = 4*self._tau_sum(A_maps_aa,A_maps_bb, self.r_weights[t], 0, 0, 0)
+                            tau += 2*self._tau_sum(A_maps_ab_sym,A_maps_ab_sym, self.r_weights[t], 0, 0, 0)
+                                
+                            t0_num[ii] += 1./24.*tau*3/self.N_it*(4.*np.pi)**(3./2.)
 
-                    # Compute all fields 
-                    Qs[0,ii]  = point_source_Q(U_maps[0][0]**3)
-                    Qs[1,ii]  = point_source_Q(U_maps[1][0]**3)
-                    Qs[2,ii]  = point_source_Q(U_maps[0][0]**2*U_maps[1][0])
-                    Qs[3,ii]  = point_source_Q(U_maps[1][0]**2*U_maps[0][0])
-                    
-            if weighting=='Ainv' and verb: print("Applying S^-1 weighting to output")
-            for qindex in range(4):
-                self._weight_Q_maps(Qs[qindex], weighting)
-            
-            return Qs.reshape(4,len(self.templates),-1)
+                    if 'tauNL-direc' in t:
+                        # Direction-dependent tauNL
+                        n1,n3,n = np.asarray(t.split(':')[1].split(',')).astype(int)
+                        AA_sum = 0.
+                        
+                        # Compute tau from these maps
+                        tmp = 0.
+                        for A_maps_xx, A_maps_xd_sym, this_proc_x_maps in zip([A_maps_aa, A_maps_bb],[A_maps_ad_sym, A_maps_bd_sym],[this_proc_a_maps,this_proc_b_maps]):
+                            for nn in np.unique([n1,n3]):
+                                if nn not in A_maps_xx.keys():
+                                    A_maps_xx[nn] = self._A_maps(this_proc_x_maps, this_proc_x_maps, nn)
+                                    A_maps_xd_sym[nn] = self._A_maps(this_proc_x_maps, proc_maps, nn, add_sym=True)
+                            if n1==n3:
+                                tmp += 2*self._tau_sum(A_maps_xx, A_maps_dd, self.r_weights[t], n1, n3, n)
+                            else:
+                                tmp += self._tau_sum(A_maps_xx,A_maps_dd, self.r_weights[t], n1, n3, n)+self._tau_sum(A_maps_dd, A_maps_xx, self.r_weights[t], n1, n3, n)
+                            tmp += self._tau_sum(A_maps_xd_sym,A_maps_xd_sym, self.r_weights[t], n1, n3, n)
+                                
+                        t2_num[ii] += -1./48.*tmp*6./self.N_it/2.*4. # x4 from dropped perms
+                        
+                        if compute_t0:
+                            # Compute additional (P_nmu*Q)_lm fields
+                            tmp = 0.
+                            for nn in np.unique([n1,n3]):
+                                if nn not in A_maps_ab_sym.keys():
+                                    A_maps_ab_sym[nn] = self._A_maps(this_proc_a_maps, this_proc_b_maps, nn, add_sym=True)
+                            if n1==n3:
+                                tmp += 2*self._tau_sum(A_maps_aa, A_maps_bb, self.r_weights[t], n1, n3, n)
+                            else:
+                                tmp += self._tau_sum(A_maps_aa, A_maps_bb, self.r_weights[t], n1, n3, n)+self._tau_sum(A_maps_bb, A_maps_aa, self.r_weights[t], n1, n3, n)
+                            tmp += self._tau_sum(A_maps_ab_sym, A_maps_ab_sym, self.r_weights[t], n1, n3, n)
+                            
+                            t0_num[ii] += 1./48.*tmp*3/self.N_it*4. # x4 from dropped perms
+                        
+                    if 'tauNL-even' in t:
+                        # Direction-dependent even tauNL
+                        n = int(t.split(':')[1])
+                        tau = 0.
+                        
+                        for A_maps_xx, A_maps_xd_sym, this_proc_x_maps in zip([A_maps_aa, A_maps_bb],[A_maps_ad_sym, A_maps_bd_sym],[this_proc_a_maps,this_proc_b_maps]):
+                            for nn in np.unique([n,0]):
+                                if nn not in A_maps_xx.keys():
+                                    A_maps_xx[nn] = self._A_maps(this_proc_x_maps, this_proc_x_maps, nn)
+                                    A_maps_xd_sym[nn] = self._A_maps(this_proc_x_maps, proc_maps, nn, add_sym=True)
+                            
+                            if n==0:
+                                tau += 6*self._tau_sum(A_maps_xx, A_maps_dd, self.r_weights[t], 0, 0, 0)
+                                tau += 3*self._tau_sum(A_maps_xd_sym, A_maps_xd_sym, self.r_weights[t], 0, 0, 0)
+                            else:    
+                                tau += 2*self._tau_sum(A_maps_xx, A_maps_dd, self.r_weights[t], n, n, 0)
+                                tau += self._tau_sum(A_maps_xd_sym, A_maps_xd_sym, self.r_weights[t], n, n, 0)
+                                tau += 2*(self._tau_sum(A_maps_xx, A_maps_dd, self.r_weights[t], 0, n, n)+self._tau_sum(A_maps_dd, A_maps_xx, self.r_weights[t], 0, n, n))
+                                tau += 2*self._tau_sum(A_maps_xd_sym,A_maps_xd_sym, self.r_weights[t], 0, n, n)
+                        
+                        pref = (-1.)**n/np.sqrt(2.*n+1.)*np.sqrt(4.*np.pi)**3.
+                        t2_num[ii] += -1./48.*tau*pref*6./self.N_it/2.*4./3. # x4 from dropped perms
 
-        # Compute Q4 maps
-        if verb: print("\n# Computing Q4 map for S^-1 weighting")
-        Q4_Sinv = compute_Q4('Sinv')
-        if verb: print("\n# Computing Q4 map for A^-1 weighting")
-        Q4_Ainv = compute_Q4('Ainv')
-        
-        # Assemble Fisher matrix
-        if verb: print("Assembling Fisher matrix")
-        
-        # Compute Fisher matrix as an outer product
-        fish = self._assemble_fish(Q4_Sinv, Q4_Ainv, sym=False)
-        if verb: print("\n# Fisher matrix contribution %d computed successfully!"%seed)
-        
-        return fish
+                        if compute_t0:
+                            # Compute additional (P_nmu*Q)_lm fields
+                            for nn in np.unique([n,0]):
+                                if nn not in A_maps_ab_sym.keys():
+                                    A_maps_ab_sym[nn] = self._A_maps(this_proc_a_maps, this_proc_b_maps, nn, add_sym=True)
+                            if n==0:
+                                tau = 6*self._tau_sum(A_maps_aa, A_maps_bb, self.r_weights[t], 0, 0, 0)
+                                tau += 3*self._tau_sum(A_maps_ab_sym, A_maps_ab_sym, self.r_weights[t], 0, 0, 0)
+                            else:
+                                tau = 2*self._tau_sum(A_maps_aa, A_maps_bb, self.r_weights[t], n, n, 0)
+                                tau += self._tau_sum(A_maps_ab_sym, A_maps_ab_sym, self.r_weights[t], n, n, 0)
+                                tau += 2*(self._tau_sum(A_maps_aa, A_maps_bb, self.r_weights[t], 0, n, n)+self._tau_sum(A_maps_bb, A_maps_aa, self.r_weights[t], 0, n, n))
+                                tau += 2*self._tau_sum(A_maps_ab_sym, A_maps_ab_sym, self.r_weights[t], 0, n, n)
+                            
+                            t0_num[ii] += 1./48.*tau*pref*3./self.N_it*4./3. # x4 from dropped perms
+                    
+                    if 'tauNL-odd' in t:
+                        # Direction-dependent odd tauNL
+                        n = int(t.split(':')[1])
+                        n1n3ns, weights = self._decompose_tauNL_odd(n)
+                        
+                        # Assemble sum for each n1,n3,n combination
+                        tau_sum = 0.
+                        for ind in range(len(n1n3ns)):
+                        
+                            n1, n3, n = n1n3ns[ind]
+                            
+                            for A_maps_xx, A_maps_xd_sym, this_proc_x_maps in zip([A_maps_aa, A_maps_bb],[A_maps_ad_sym, A_maps_bd_sym],[this_proc_a_maps,this_proc_b_maps]):
+                                if n1 not in A_maps_xx.keys():
+                                    A_maps_xx[n1] = self._A_maps(this_proc_x_maps, this_proc_x_maps, n1)
+                                    A_maps_xd_sym[n1] = self._A_maps(this_proc_x_maps, proc_maps, n1, add_sym=True)
+                                if n3 not in A_maps_xx.keys():
+                                    A_maps_xx[n3] = self._A_maps(this_proc_x_maps, this_proc_x_maps, n3)
+                                    A_maps_xd_sym[n3] = self._A_maps(this_proc_x_maps, proc_maps, n3, add_sym=True)
+
+                                if n1==n3:
+                                    tau = 2*self._tau_sum(A_maps_xx, A_maps_dd, self.r_weights[t], n1, n3, n)
+                                else:
+                                    tau = self._tau_sum(A_maps_xx, A_maps_dd, self.r_weights[t], n1, n3, n)+self._tau_sum(A_maps_dd, A_maps_xx, self.r_weights[t], n1, n3, n)
+                                tau += self._tau_sum(A_maps_xd_sym, A_maps_xd_sym, self.r_weights[t], n1, n3, n)
+                                                                    
+                                # Add to output    
+                                tau_sum += weights[ind]*tau
+                        
+                        t2_num[ii] += -1./48.*tau_sum*6./self.N_it/2.*4. # x4 from dropped perms
+
+                        if compute_t0:
+                                
+                            # Assemble sum for each n1,n3,n combination
+                            tau_sum = 0.
+                            for ind in range(len(n1n3ns)):
+                                n1, n3, n = n1n3ns[ind]
+                            
+                                # Compute additional (P_nmu*Q)_lm fields
+                                if n1 not in A_maps_ab_sym.keys():
+                                    A_maps_ab_sym[n1] = self._A_maps(this_proc_a_maps, this_proc_b_maps, n1, add_sym=True)
+                                if n3 not in A_maps_ab_sym.keys():
+                                    A_maps_ab_sym[n3] = self._A_maps(this_proc_a_maps, this_proc_b_maps, n3, add_sym=True)
+                                
+                                if n1==n3:
+                                    tau = 2*self._tau_sum(A_maps_aa, A_maps_bb, self.r_weights[t], n1, n3, n)
+                                else:
+                                    tau = self._tau_sum(A_maps_aa, A_maps_bb, self.r_weights[t], n1, n3, n)+self._tau_sum(A_maps_bb, A_maps_aa, self.r_weights[t], n1, n3, n)
+                                tau += self._tau_sum(A_maps_ab_sym, A_maps_ab_sym, self.r_weights[t], n1, n3, n)
+                                                                    
+                                # Add to output    
+                                tau_sum += weights[ind]*tau
+                            
+                            # Add to t0                              
+                            t0_num[ii] += 1./48.*tau_sum*3./self.N_it*4. # x4 from dropped perms
+
+                    if 'tauNL-light' in t:
+                        # Light particle collider tauNL
+                        s = int(t.split(':')[1].split(',')[0])
+                        nu_s = float(t.split(':')[1].split(',')[1])
+                        
+                        # Compute 2-field term
+                        tau = 0.
+                        for A_maps_xx, A_maps_xd_sym, this_proc_x_maps in zip([A_maps_aa, A_maps_bb],[A_maps_ad_sym, A_maps_bd_sym],[this_proc_a_maps,this_proc_b_maps]):
+                                        
+                            # Compute additional (P^beta_sl*Q)_LM fields
+                            coll_str = 'coll-%d,%.8f,%.8fi'%(s,-1.5+nu_s,0)
+                            if coll_str not in A_maps_xx.keys():
+                                A_maps_xx[coll_str] = self._A_maps(this_proc_x_maps, this_proc_x_maps, s, beta=-1.5+nu_s)
+                            if coll_str not in A_maps_xd_sym.keys():
+                                A_maps_xd_sym[coll_str] = self._A_maps(this_proc_x_maps, proc_maps, s, add_sym=True, beta=-1.5+nu_s)
+                            
+                            # Compute 4-field term
+                            tau += 2*self._tau_sum_collider(A_maps_xx, A_maps_dd, self.r_weights[t], s, -1.5+nu_s)
+                            tau += self._tau_sum_collider(A_maps_xd_sym, A_maps_xd_sym, self.r_weights[t], s, -1.5+nu_s)
+                        
+                        # Integrate over r, r'
+                        t2_num[ii] += -1./24.*tau*6./self.N_it/2.*2. # x2 from dropped perms
+
+                        if compute_t0:
+                            
+                            # Compute additional (P^beta_sl*Q)_LM fields
+                            if coll_str not in A_maps_ab_sym.keys():
+                                A_maps_ab_sym[coll_str] = self._A_maps(this_proc_a_maps, this_proc_b_maps, s, add_sym=True, beta=-1.5+nu_s)
+                            
+                            # Compute 4-field term
+                            tau = 2*self._tau_sum_collider(A_maps_aa, A_maps_bb, self.r_weights[t], s, -1.5+nu_s)
+                            tau += self._tau_sum_collider(A_maps_ab_sym,A_maps_ab_sym, self.r_weights[t], s, -1.5+nu_s)
+                            
+                            # Integrate over r, r'
+                            t0_num[ii] += 1./24.*tau*3/self.N_it*2. # x2 from dropped perms
+
+                    if 'tauNL-heavy' in t:
+                        # Heavy particle collider tauNL
+                        s = int(t.split(':')[1].split(',')[0])
+                        mu_s = float(t.split(':')[1].split(',')[1])
+                        
+                        pos_str = 'coll-%d,%.8f,%.8fi'%(s,-1.5,-1.0*mu_s)
+                        neg_str = 'coll-%d,%.8f,%.8fi'%(s,-1.5,+1.0*mu_s)
+                            
+                        # Compute 2-field term
+                        tau = 0.
+                        for A_maps_xx, A_maps_xd_sym, this_proc_x_maps in zip([A_maps_aa, A_maps_bb],[A_maps_ad_sym, A_maps_bd_sym],[this_proc_a_maps,this_proc_b_maps]):
+                            
+                            # Compute additional (P^beta_sl*Q)_LM fields
+                            if pos_str not in A_maps_xx.keys():
+                                A_maps_xx[pos_str] = self._A_maps(this_proc_x_maps, this_proc_x_maps, s, False, beta=-1.5-1.0j*mu_s)
+                                A_maps_xd_sym[pos_str] = self._A_maps(this_proc_x_maps, proc_maps, s, True, beta=-1.5-1.0j*mu_s)
+                            if neg_str not in A_maps_xx.keys():
+                                A_maps_xx[neg_str] = self._A_maps(this_proc_x_maps, this_proc_x_maps, s, False, beta=-1.5+1.0j*mu_s)
+                                A_maps_xd_sym[neg_str] = self._A_maps(this_proc_x_maps, proc_maps, s, True, beta=-1.5+1.0j*mu_s)
+                            
+                            # Compute 4-field term
+                            tau += 2*self._tau_sum_collider(A_maps_xx, A_maps_dd, self.r_weights[t], s, -1.5-1.0j*mu_s)
+                            tau += self._tau_sum_collider(A_maps_xd_sym,A_maps_xd_sym, self.r_weights[t], s, -1.5-1.0j*mu_s)
+                        
+                        # Integrate over r, r'
+                        t2_num[ii] += -1./24.*tau*6./self.N_it/2.*2. # x2 from dropped perms
+                        
+                        if compute_t0:
+                            
+                            # Compute additional (P^beta_sl*Q)_LM fields
+                            if pos_str not in A_maps_ab_sym.keys():
+                                A_maps_ab_sym[pos_str] = self._A_maps(this_proc_a_maps, this_proc_b_maps, s, True, beta=-1.5-1.0j*mu_s)
+                            if neg_str not in A_maps_ab_sym.keys():
+                                A_maps_ab_sym[neg_str] = self._A_maps(this_proc_a_maps, this_proc_b_maps, s, True, beta=-1.5+1.0j*mu_s)
+                            
+                            # Compute 4-field term
+                            tau = 2*self._tau_sum_collider(A_maps_aa, A_maps_bb, self.r_weights[t], s, -1.5-1.0j*mu_s)
+                            tau += self._tau_sum_collider(A_maps_ab_sym,A_maps_ab_sym, self.r_weights[t], s, -1.5-1.0j*mu_s)
+                            
+                            # Integrate over r, r'
+                            t0_num[ii] += 1./24.*tau*3/self.N_it*2. # x2 from dropped perms
+                        
+                    if t=='lensing':
+                        # Lensing template
+                        Ls = self.base.l_arr[(self.base.l_arr>=self.Lmin_lens)*(self.base.l_arr<=self.Lmax_lens)]
+                        Ms = self.base.m_arr[(self.base.l_arr>=self.Lmin_lens)*(self.base.l_arr<=self.Lmax_lens)]
+
+                        # First set of fields
+                        Phi_aa = self._compute_lensing_Phi(this_proc_a_maps,this_proc_a_maps)
+                        Phi_ad = self._compute_lensing_Phi(this_proc_a_maps,proc_maps,add_sym=True)
+                        Phi_sum = 4.*Phi_aa*Phi_dd.conj()+2.*Phi_ad*Phi_ad.conj()
+                        del Phi_ad
+                        
+                        # Second set of fields
+                        Phi_bb = self._compute_lensing_Phi(this_proc_b_maps,this_proc_b_maps)
+                        Phi_bd = self._compute_lensing_Phi(this_proc_b_maps,proc_maps,add_sym=True)
+                        Phi_sum += 4.*Phi_bb*Phi_dd.conj()+2.*Phi_bd*Phi_bd.conj()
+                        del Phi_bd
+                        
+                        t_init = time.time()
+                        t2_num[ii] += -1./24.*np.sum(Ls*(Ls+1.)*Phi_sum*(1.+(Ms>0))*self.C_phi[Ls]).real*3./self.N_it
+                        self.timers['lensing_summation'] += time.time()-t_init
+               
+                        if compute_t0:
+                            Phi_ab = self._compute_lensing_Phi(this_proc_a_maps,this_proc_b_maps,add_sym=True)
+                            Phi_sum = 4.*Phi_aa*Phi_bb.conj()+2.*Phi_ab*Phi_ab.conj()
+                            del Phi_ab, Phi_aa, Phi_bb
+                            
+                            t_init = time.time()
+                            t0_num[ii] += 1./24.*np.sum(Ls*(Ls+1.)*Phi_sum*(1.+(Ms>0))*self.C_phi[Ls]).real*3./self.N_it
+                            self.timers['lensing_summation'] += time.time()-t_init
+                        del Phi_sum
+                     
+                    if t=='isw-lensing':
+                        # ISW-Lensing template
+                        Ls = self.base.l_arr[(self.base.l_arr>=self.Lmin_lens)*(self.base.l_arr<=self.Lmax_lens)]
+                        Ms = self.base.m_arr[(self.base.l_arr>=self.Lmin_lens)*(self.base.l_arr<=self.Lmax_lens)]
+
+                        # First set of fields
+                        Phi_aa_lens = self._compute_lensing_Phi(this_proc_a_maps,this_proc_a_maps,isw=False)
+                        Phi_aa_isw = self._compute_lensing_Phi(this_proc_a_maps,this_proc_a_maps,isw=True)
+                        Phi_ad_lens = self._compute_lensing_Phi(this_proc_a_maps,proc_maps,add_sym=True,isw=False)
+                        Phi_ad_isw = self._compute_lensing_Phi(this_proc_a_maps,proc_maps,add_sym=True,isw=True)
+                        Phi_sum =  (4.*Phi_aa_isw*Phi_dd_isw.conj()+2.*Phi_ad_isw*Phi_ad_isw.conj())*self.C_lens_weight['TT'][Ls]
+                        Phi_sum += (4.*Phi_aa_isw*Phi_dd_lens.conj()+2.*Phi_ad_isw*Phi_ad_lens.conj())*self.C_Tphi[Ls]
+                        Phi_sum += (4.*Phi_aa_lens*Phi_dd_isw.conj()+2.*Phi_ad_lens*Phi_ad_isw.conj())*self.C_Tphi[Ls]
+                        del Phi_ad_isw
+                        
+                        # Second set of fields
+                        Phi_bb_lens = self._compute_lensing_Phi(this_proc_b_maps,this_proc_b_maps,isw=False)
+                        Phi_bb_isw = self._compute_lensing_Phi(this_proc_b_maps,this_proc_b_maps,isw=True)
+                        Phi_bd_lens = self._compute_lensing_Phi(this_proc_b_maps,proc_maps,add_sym=True,isw=False)
+                        Phi_bd_isw = self._compute_lensing_Phi(this_proc_b_maps,proc_maps,add_sym=True,isw=True)
+                        Phi_sum += (4.*Phi_bb_isw*Phi_dd_isw.conj()+2.*Phi_bd_isw*Phi_bd_isw.conj())*self.C_lens_weight['TT'][Ls]
+                        Phi_sum += (4.*Phi_bb_isw*Phi_dd_lens.conj()+2.*Phi_bd_isw*Phi_bd_lens.conj())*self.C_Tphi[Ls]
+                        Phi_sum += (4.*Phi_bb_lens*Phi_dd_isw.conj()+2.*Phi_bd_lens*Phi_bd_isw.conj())*self.C_Tphi[Ls]
+                        del Phi_bd_isw
+                        
+                        t_init = time.time()
+                        t2_num[ii] += -1./24.*np.sum(Ls*(Ls+1.)*Phi_sum*(1.+(Ms>0))).real*3./self.N_it
+                        self.timers['lensing_summation'] += time.time()-t_init
+               
+                        if compute_t0:
+                            Phi_ab_lens = self._compute_lensing_Phi(this_proc_a_maps,this_proc_b_maps,add_sym=True,isw=False)
+                            Phi_ab_isw = self._compute_lensing_Phi(this_proc_a_maps,this_proc_b_maps,add_sym=True,isw=True)
+                            Phi_sum  = (4.*Phi_aa_isw*Phi_bb_isw.conj()+2.*Phi_ab_isw*Phi_ab_isw.conj())*self.C_lens_weight['TT'][Ls]
+                            Phi_sum += (4.*Phi_aa_isw*Phi_bb_lens.conj()+2.*Phi_ab_isw*Phi_ab_lens.conj())*self.C_Tphi[Ls]
+                            Phi_sum += (4.*Phi_aa_lens*Phi_bb_isw.conj()+2.*Phi_ab_lens*Phi_ab_isw.conj())*self.C_Tphi[Ls]
+                            del Phi_ab_isw, Phi_aa_isw, Phi_bb_isw
+                            
+                            t_init = time.time()
+                            t0_num[ii] += 1./24.*np.sum(Ls*(Ls+1.)*Phi_sum*(1.+(Ms>0))).real*3./self.N_it
+                            self.timers['lensing_summation'] += time.time()-t_init
+                        del Phi_sum
+                        
+                    if t=='point-source':
+                        t_init = time.time()
+                        
+                        def _return_perm(map12, map34):
+                            return np.sum(map12['u'][0].real**2.*map34['u'][0].real**2.)
+                        
+                        # First set of fields
+                        summ = _return_perm(proc_maps, this_proc_a_maps)
+                        # Second set of fields
+                        summ += _return_perm(proc_maps, this_proc_b_maps)
+                        t2_num[ii] += -3./24.*summ/self.N_it*self.base.A_pix
+
+                        if compute_t0:
+                            summ = _return_perm(this_proc_a_maps, this_proc_b_maps)
+                            t0_num[ii] += 3./24.*summ/self.N_it*self.base.A_pix
+                        self.timers['gNL_summation'] += time.time()-t_init
+
+            # Load t0 from memory, if already computed
+            if not compute_t0:
+                t0_num = self.t0_num
+            else:
+                self.t0_num = t0_num
+
+        if include_disconnected_term:
+            t_num = t4_num+t2_num+t0_num
+        else:
+            t_num = t4_num
+
+        return t_num
     
-    def compute_fisher(self, N_it, verb=False):
-        """
-        Compute the Fisher matrix using N_it realizations. These are run in serial (since the code is already parallelized).
-        
-        For high-dimensional problems, it is usually preferred to split the computation across a cluster with MPI, calling compute_fisher_contribution for each instead of this function.
-        """
-        # Initialize output
-        fish = np.zeros((len(self.templates),len(self.templates)))
-        
-        # Iterate over N_it seeds
-        for seed in range(N_it):
-            print("Computing Fisher contribution %d of %d"%(seed+1,N_it))
-            fish += self.compute_fisher_contribution(seed, verb=verb*(seed==0))/N_it
-        
-        # Store matrix in class attributes
-        self.fish = fish
-        self.inv_fish = np.linalg.inv(fish)
-
-        return fish
-    
-    def Tl_unwindowed(self, data, fish=[], include_disconnected_term=True, verb=False, input_type='map'):
-        """
-        Compute the unwindowed trispectrum estimator for all combinations of fields.
-        
-        The code either uses pre-computed Fisher matrices or reads them in on input. 
-        
-        Note that we return the imaginary part of odd-parity trispectra.
-
-        We can also optionally switch off the disconnected terms.
-        """
-        if verb: print("")
-
-        if len(fish)!=0:
-            self.fish = fish
-            self.inv_fish = np.linalg.inv(fish)
-
-        if not hasattr(self,'inv_fish'):
-            raise Exception("Need to compute Fisher matrix first!")
-        
-        # Compute numerator
-        Tl_num = self.Tl_numerator(data, verb=verb, include_disconnected_term=include_disconnected_term)
-
-        # Apply normalization
-        Tl_out = np.matmul(self.inv_fish,Tl_num)
-
-        # Create output dictionary
-        Tl_dict = {}
-        index = 0
-        # Iterate over fields
-        for t in self.templates:
-            Tl_dict[t] = Tl_out[index]
-            index += 1
-            
-        return Tl_dict
-
     ### OPTIMIZATION
     @_timer_func('optimization')
     def optimize_radial_sampling_1d(self, reduce_r=1, tolerance=1e-3, N_fish_optim=1, stalled_iterations=np.inf, N_split=None, split_index=None, initial_r_points=None, verb=False, optimize_weights = False, optimize_skip=0, repeat_trials=True, r_guess = [], weight_guess = {}):
@@ -3839,262 +3678,657 @@ class TSpecTemplate():
 
         return self.rtau_arr, self.rtau_weights
     
-    def _compute_fisher_derivatives(self, templates, N_fish_optim=None, verb=False):
-        """Compute the derivative of the ideal Fisher matrix with respect to the weights for each template of interest."""
+    ### NORMALIZATION  
+    @_timer_func('fisher')
+    def compute_fisher_contribution(self, seed, verb=False):
+        """
+        This computes the contribution to the Fisher matrix from a single pair of GRF simulations, created internally.
+        """
+        # Check we have initialized correctly
+        if self.ints_1d and (not hasattr(self,'r_arr')):
+            raise Exception("Need to supply radial integration points or run optimize_radial_sampling_1d()!")
+        if self.ints_2d and (not hasattr(self,'rtau_arr')):
+            raise Exception("Need to supply radial/tau integration points or run optimize_radial_sampling_2d()!")
 
-        # Output array
-        output = {}
+        print("Computing Fisher matrix with seed %d"%seed)
         
-        # Separate out tauNL templates
-        contact_templates = []
-        exchange_templates = []
-        for template in templates:
-            if 'gNL' in template: 
-                contact_templates.append(template)
-            elif 'tauNL' in template:
-                exchange_templates.append(template)
+        # Initialize output
+        fish = np.zeros((len(self.templates),len(self.templates)),dtype='complex')
+
+        # Compute two random realizations with known power spectrum, removing the beam
+        if verb: print("# Generating GRFs")
+        t_init = time.time()
+        a_maps = []
+        for ii in range(2):
+            if self.ones_mask:
+                a_maps.append(self.base.generate_data(seed=seed+int((1+ii)*1e9), output_type='harmonic',lmax=self.lmax, deconvolve_beam=True))
             else:
-                raise Exception("Template %s not implemented!"%template)
-                
-        # Start with contact templates
-        if len(contact_templates)!=0:
-            # Compute arrays
-            # NB: using exact Gauss-Legendre integration in mu
-            [mus, w_mus] = p_roots(2*self.lmax+1)
-            ls = np.arange(self.lmin,self.lmax+1)
-            legs = np.asarray([lpmn(0,self.lmax,mus[i])[0][0,self.lmin:] for i in range(len(mus))])
-                
+                # we can't truncate to l<=lmax here, since we need to apply the mask!
+                a_maps.append(self.base.generate_data(seed=seed+int((1+ii)*1e9), output_type='harmonic', deconvolve_beam=True))
+        self.timers['fish_grfs'] += time.time()-t_init
+        
+        # Define Q map code
+        def compute_Q4(weighting):
+            """
+            Assemble and return an array of Q4 maps in real- or harmonic-space, for S^-1 or A^-1 weighting. 
+
+            Schematically Q ~ (A[x]B[y,z]_lm + perms., and we dynamically compute each permutation of (A B)_lm.
+
+            The outputs are either Q_i or S^-1.P.Q_i.
+            """
+            
+            # Weight maps by S^-1.P or A^-1
+            if verb: print("Weighting maps")
+            
             t_init = time.time()
-            for template in contact_templates:
-                    
-                if template=='gNL-loc':
-                    if verb: print("\tComputing gNL-loc Fisher matrix derivative exactly")
-                    deriv_matrix = np.asarray(fisher_deriv_gNL_loc(self.plLXs[self.nmax], self.qlXs, self.quad_weights_1d, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'), 
-                                        legs, w_mus, self.lmin, self.lmax, self.base.nthreads))
-                    
-                elif template=='gNL-con':
-
-                    if verb: print("\tComputing gNL-con Fisher matrix derivative exactly")
-                    deriv_matrix = np.asarray(fisher_deriv_gNL_con(self.rlXs, self.quad_weights_1d, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'),
-                                        legs, w_mus, self.lmin, self.lmax, self.base.nthreads))
-                
-                elif template=='gNL-dotdot':
-
-                    if verb: print("\tComputing gNL-dotdot Fisher matrix derivative exactly")
-                    deriv_matrix = np.asarray(fisher_deriv_gNL_dotdot(self.alXs, self.rtau_arr[:,1], self.quad_weights_2d, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'), 
-                                            legs, w_mus, self.lmin, self.lmax, self.base.nthreads))
-                
-                elif template=='gNL-dotdel':
-                    
-                    if verb: print("\tComputing gNL-dotdel Fisher matrix derivative exactly")
-                    deriv_matrix = np.asarray(fisher_deriv_gNL_dotdel(self.alXs, self.blXs, self.clXs, self.rtau_arr[:,1], self.quad_weights_2d, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'), 
-                                            legs, mus, w_mus, self.lmin, self.lmax, self.base.nthreads))
-                    
-                elif template=='gNL-deldel':
-                    
-                    if verb: print("\tComputing gNL-deldel Fisher matrix derivative exactly")
-                    deriv_matrix = np.asarray(fisher_deriv_gNL_deldel(self.blXs, self.clXs, self.quad_weights_2d, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'), 
-                                            legs, mus, w_mus, self.lmin, self.lmax, self.base.nthreads))
-                   
+            if weighting=='Sinv':
+                # Compute S^-1.P.a
+                if self.ones_mask:
+                    Uinv_a_lms = [np.asarray(self.applySinv(self.base.beam_lm[:,self.base.l_arr<=self.lmax]*a_lm, input_type='harmonic', lmax=self.lmax)[:,self.lminfilt],order='C') for a_lm in a_maps]
                 else:
-                    raise Exception("Template %s not implemented!"%template)
-                    
-                output[template] = np.sum(deriv_matrix), deriv_matrix
-
-            self.timers['analytic_fisher'] += time.time()-t_init
-
-        # Move to tauNL estimators
-        if len(exchange_templates)!=0:
+                    Uinv_a_lms = [np.asarray(self.applySinv(self.mask*self.base.to_map(self.base.beam_lm*a_lm), lmax=self.lmax)[:,self.lminfilt],order='C') for a_lm in a_maps]
+                self.timers['Sinv'] += time.time()-t_init
+            elif weighting=='Ainv':
+                # Compute A^-1.a
+                if self.ones_mask:
+                    Uinv_a_lms = [np.asarray(self.base.applyAinv(a_lm, input_type='harmonic', lmax=self.lmax)[:,self.lminfilt],order='C') for a_lm in a_maps]
+                else:
+                    Uinv_a_lms = [np.asarray(self.base.applyAinv(a_lm, input_type='harmonic')[:,self.lfilt],order='C') for a_lm in a_maps]
+                self.timers['Ainv'] += time.time()-t_init 
             
-            # Precompute common terms
-            all_Uinv_lms = []
-            Q_maps = []
-            
-            all_Q4 = {t: [] for t in exchange_templates}
-            init_score = {t: 0 for t in exchange_templates}
-            deriv_matrix = {t: 0 for t in exchange_templates}
-            
-            # Define weight indices
-            inds = np.arange(self.N_r,dtype=np.int32)
-            i_weights = np.ones(self.N_r)*self.quad_weights_1d[inds]
-            d_weights = self.quad_weights_1d[inds]
-        
-            for seed in range(N_fish_optim):
-                
-                print("\nComputing Fisher matrix derivatives from realization %d of %d"%(seed+1, N_fish_optim))
-                
-                # Compute A^-1.a GRF maps 
-                Uinv_a_lms = []
-                for ii in range(2):
-                    t_init = time.time()
-                    a_lm = self.base.generate_data(seed=seed+int((1+ii)*1e9), output_type='harmonic', deconvolve_beam=True)
-                    self.timers['fish_grfs'] += time.time()-t_init
-                    t_init = time.time()
-                    Uinv_a_lms.append(np.asarray(self.base.applyAinv(a_lm, input_type='harmonic')[:,self.lfilt],order='C'))
-                    self.timers['Ainv'] += time.time()-t_init
-                all_Uinv_lms.append(Uinv_a_lms)
-                
-                # Compute Q maps
+            # Filter maps
+            if verb: print("Computing filtered maps")
+            if 'q' in self.to_compute:
                 if verb: print("Creating Q maps")
-                Q_maps = np.asarray(self._filter_pair(Uinv_a_lms, 'Q'),dtype=np.float64,order='C')    
-
-                # Compute P maps
-                if verb and len(self.p_inds)>0: print("Creating P_{n,mu} maps")
-                P_maps = self._filter_pair(Uinv_a_lms, 'P')
-                
-                # Compute collider P maps     
-                if verb and len(self.coll_params.keys())>0: print("Creating collider P^beta_{s,lam} maps")
-                coll_P_maps = self._filter_pair(Uinv_a_lms, 'coll-P')
-                
-                def _compute_direc_deriv_single(n1n3ns, weights):
-                    """Compute the idealized directional Fisher matrix derivative for a given random seed."""
-                    
-                    # Compute F_L * [P_{nmu} Q]_LM maps
-                    Q4a_11, Q4b_11, Q4a_1del, Q4b_1del = 0.,0.,0.,0.
-                    for n_it in range(len(n1n3ns)):
-                        n1, n3, n = n1n3ns[n_it]
-                        
-                        F_vecs_all = self._F_PQ(P_maps[n3], Q_maps, i_weights, n1, n3, n, inds=inds)
-                        
-                        # Compute Q4 maps
-                        Qs = self._compute_ideal_Q4(P_maps[n1], Q_maps, F_vecs_all, i_weights, n1=n1, del_weights=d_weights, apply_weighting=True, with_deriv=True, with_deriv_weight=True)
-                        Q4a_11 += weights[n_it]*Qs[0]
-                        Q4b_11 += weights[n_it]*Qs[1]
-                        Q4a_1del += weights[n_it]*Qs[2]
-                        Q4b_1del += weights[n_it]*Qs[3] 
-                        
-                    this_Q4 = [Q4a_11, Q4b_11]
-                    
-                    # Assemble score and derivative
-                    this_score = self._assemble_fish(Q4a_11, Q4b_11, sym=True).ravel()
-                    this_matrix = self._assemble_fish_ideal(Q4a_1del, Q4b_1del, sym=True)
-                    return this_Q4, this_score, this_matrix
-
-                def _compute_coll_deriv_single(beta, s):
-                    """Compute the idealized collider Fisher matrix derivative for a term specified by (complex) beta and spin s for a given random seed."""
+                Q_maps = self._filter_pair(Uinv_a_lms, 'Q')   
+            if 'r' in self.to_compute:
+                if verb: print("Creating R maps")
+                R_maps = self._filter_pair(Uinv_a_lms, 'R')
+            if 'a' in self.to_compute:
+                if verb: print("Creating A maps")
+                A_maps = self._filter_pair(Uinv_a_lms, 'A')
+            if 'b' in self.to_compute:
+                if verb: print("Creating B maps")
+                B_maps = self._filter_pair(Uinv_a_lms, 'B')
+            if 'c' in self.to_compute:
+                if verb: print("Creating C maps")
+                C_maps = self._filter_pair(Uinv_a_lms, 'C')
+            if 'u' in self.to_compute:
+                if verb: print("Creating U maps")
+                U_maps = self._filter_pair(Uinv_a_lms, 'U')
+            if 'v' in self.to_compute:
+                if verb: print("Creating V maps")
+                V_maps = self._filter_pair(Uinv_a_lms, 'V')
+            if 'v-isw' in self.to_compute:
+                if verb: print("Creating ISW V maps")
+                V_isw_maps = self._filter_pair(Uinv_a_lms, 'V-ISW')
             
-                    # Compute Sum_S C_s(S, i nu_s)F^{-2beta}_L * [P^beta_{sl} Q]_LM maps
-                    Q4a_11, Q4b_11, Q4a_1del, Q4b_1del = 0.,0.,0.,0.
+            # Compute all P maps
+            if verb and len(self.p_inds)>0: print("Creating P_{n,mu} maps")
+            P_maps = self._filter_pair(Uinv_a_lms, 'P')
+            
+            # Compute all collider P maps
+            if verb and len(self.coll_params.keys())>0: print("Creating collider P^beta_{s,lam} maps")
+            coll_P_maps = self._filter_pair(Uinv_a_lms, 'coll-P')
+            
+            # Define output arrays (Q111, Q222, Q112, Q122)
+            Qs = np.zeros((4,len(self.templates),1+2*self.pol,np.sum(self.lfilt)),dtype=np.complex128,order='C')
+            
+            # Helper functions
+            def _add_to_Q(n1,n3,n,w):
+                """Process a given (n1,n3,n) triplet and add it to the tauNL Q-derivative. This takes also a weight w."""
+                
+                # Compute F_L * [P_{nmu} Q]_LM maps
+                F_vecs = self._F_PQ(P_maps[n3], Q_maps, self.r_weights[t], n1, n3, n)
+                
+                # Compute Q4 maps
+                Qs[:,ii] += w*self._get_Q4_perms(P_maps[n1], Q_maps, F_vecs, self.r_weights[t], n1)
+                
+            def _add_to_Q_coll(beta, s):
+                """Process a given collider field and add it to the tauNL Q-derivative."""
+                
+                # Compute Sum_S C_s(S, i nu_s)F^{-2beta}_L * [P^beta_{sl} Q]_LM maps
+                if np.imag(beta)!=0:
                     
-                    if np.imag(beta)!=0:
-                        # Compute F_L^beta * [P^beta_{slam} Q]_LM maps
-                        F_vecs_all = self._coll_F_PQ(coll_P_maps[beta,s], Q_maps, i_weights, s, beta, coll_P_maps[np.conj(beta),s], inds=inds) 
-                        
-                        # Compute Q4 maps
-                        Q4a_11, Q4b_11, Q4a_1del, Q4b_1del = self._compute_ideal_Q4(coll_P_maps[beta,s], Q_maps, F_vecs_all, i_weights, s, beta, coll_P_maps[np.conj(beta),s], del_weights=d_weights, apply_weighting=True, with_deriv=True, with_deriv_weight=True)
-                        
+                    # Compute F_L^beta * [P^beta_{slam} Q]_LM maps
+                    F_vecs = self._coll_F_PQ(coll_P_maps[beta,s], Q_maps, self.r_weights[t], s, beta, conjPs_maps=coll_P_maps[np.conj(beta),s]) 
+                    
+                    # Compute Q4 maps
+                    Qs[:,ii] += self._get_Q4_perms(coll_P_maps[beta,s], Q_maps, F_vecs, self.r_weights[t], s, beta, conjPn1_maps=coll_P_maps[np.conj(beta),s])
+                    
+                else:
+                    # Compute F_L^beta * [P^beta_{slam} Q]_LM maps
+                    F_vecs = self._coll_F_PQ(coll_P_maps[beta,s], Q_maps, self.r_weights[t], s, beta) 
+                    
+                    # Compute Q4 maps
+                    Qs[:,ii] += self._get_Q4_perms(coll_P_maps[beta,s], Q_maps, F_vecs, self.r_weights[t], s, beta)
+                    
+            # Compute products (with symmetries)
+            for ii,t in enumerate(self.templates):
+                
+                if t=='gNL-loc':
+                    
+                    if verb: print("Computing Q-derivative for gNL-loc")
+                    P0_maps = P_maps[0][:,0]*np.sqrt(4.*np.pi)
+                    
+                    # 111 
+                    Qs[0,ii]  = 162./25.*self._transform_maps(self.utils.multiply(P0_maps[0],P0_maps[0],Q_maps[0]),
+                                                              self.plLXs[self.nmax],self.r_weights[t])
+                    Qs[0,ii] += 54./25.*self._transform_maps(self.utils.multiply(P0_maps[0],P0_maps[0],P0_maps[0]),
+                                                             self.qlXs,self.r_weights[t])
+
+                    # 222
+                    Qs[1,ii]  = 162./25.*self._transform_maps(self.utils.multiply(P0_maps[1],P0_maps[1],Q_maps[1]),
+                                                              self.plLXs[self.nmax],self.r_weights[t])
+                    Qs[1,ii] += 54./25.*self._transform_maps(self.utils.multiply(P0_maps[1],P0_maps[1],P0_maps[1]),
+                                                             self.qlXs,self.r_weights[t])
+
+                    # 112
+                    Qs[2,ii]  = 54./25.*self._transform_maps(self.utils.multiply_asym(P0_maps[0],P0_maps[1],Q_maps[0],Q_maps[1]),
+                                                             self.plLXs[self.nmax],self.r_weights[t])
+                    Qs[2,ii] += 54./25.*self._transform_maps(self.utils.multiply(P0_maps[0],P0_maps[0],P0_maps[1]),
+                                                             self.qlXs,self.r_weights[t])
+
+                    # 122
+                    Qs[3,ii]  = 54./25.*self._transform_maps(self.utils.multiply_asym(P0_maps[1],P0_maps[0],Q_maps[1], Q_maps[0]),
+                                                             self.plLXs[self.nmax],self.r_weights[t])
+                    Qs[3,ii] += 54./25.*self._transform_maps(self.utils.multiply(P0_maps[0],P0_maps[1],P0_maps[1]),
+                                                             self.qlXs,self.r_weights[t])
+
+                if t=='gNL-con':
+                    if verb: print("Computing Q-derivative for gNL-con")
+                    
+                    # Compute all fields 
+                    Qs[0,ii]  = 216./25.*self._transform_maps(self.utils.multiply(R_maps[0],R_maps[0],R_maps[0]),
+                                                              self.rlXs,self.r_weights[t])
+                    Qs[1,ii]  = 216./25.*self._transform_maps(self.utils.multiply(R_maps[1],R_maps[1],R_maps[1]),
+                                                              self.rlXs,self.r_weights[t])
+                    Qs[2,ii]  = 216./25.*self._transform_maps(self.utils.multiply(R_maps[0],R_maps[0],R_maps[1]),
+                                                              self.rlXs,self.r_weights[t])
+                    Qs[3,ii]  = 216./25.*self._transform_maps(self.utils.multiply(R_maps[0],R_maps[1],R_maps[1]),
+                                                              self.rlXs,self.r_weights[t])
+                
+                if t=='gNL-dotdot':
+                    if verb: print("Computing Q-derivative for gNL-dotdot")
+                    
+                    # Compute all fields 
+                    Qs[0,ii]  = 9216./25.*self._transform_maps(self.utils.multiply(A_maps[0],A_maps[0],A_maps[0]),
+                                                               self.alXs*self.rtau_arr[:,1][None,None,:]**4,self.rtau_weights[t])
+                    Qs[1,ii]  = 9216./25.*self._transform_maps(self.utils.multiply(A_maps[1],A_maps[1],A_maps[1]),
+                                                               self.alXs*self.rtau_arr[:,1][None,None,:]**4,self.rtau_weights[t])
+                    Qs[2,ii]  = 9216./25.*self._transform_maps(self.utils.multiply(A_maps[0],A_maps[0],A_maps[1]),
+                                                               self.alXs*self.rtau_arr[:,1][None,None,:]**4,self.rtau_weights[t])
+                    Qs[3,ii]  = 9216./25.*self._transform_maps(self.utils.multiply(A_maps[0],A_maps[1],A_maps[1]),
+                                                               self.alXs*self.rtau_arr[:,1][None,None,:]**4,self.rtau_weights[t])
+                
+                if t=='gNL-dotdel':
+                    if verb: print("Computing Q-derivative for gNL-dotdel")
+                    
+                    # 111 
+                    Qs[0,ii]  = 41472./325.*self._transform_maps(self.utils.multiplyCC(A_maps[0],B_maps[0],C_maps[0]),
+                                                                   self.alXs*self.rtau_arr[:,1][None,None,:]**2.,self.rtau_weights[t])
+                    Qs[0,ii] += 41472./325.*self._transform_maps(self.utils.multiply(A_maps[0],A_maps[0],B_maps[0]),
+                                                                   self.blXs*self.rtau_arr[:,1][None,None,:]**2.,self.rtau_weights[t])
+                    Qs[0,ii] += 41472./325.*self._transform_maps(self.utils.multiplyC(A_maps[0],A_maps[0],C_maps[0]),
+                                                                   self.clXs*self.rtau_arr[:,1][None,None,:]**2.,self.rtau_weights[t],spin=1)
+                    
+                    # 222
+                    Qs[1,ii]  = 41472./325.*self._transform_maps(self.utils.multiplyCC(A_maps[1],B_maps[1],C_maps[1]),
+                                                                   self.alXs*self.rtau_arr[:,1][None,None,:]**2.,self.rtau_weights[t])
+                    Qs[1,ii] += 41472./325.*self._transform_maps(self.utils.multiply(A_maps[1],A_maps[1],B_maps[1]),
+                                                                   self.blXs*self.rtau_arr[:,1][None,None,:]**2.,self.rtau_weights[t])
+                    Qs[1,ii] += 41472./325.*self._transform_maps(self.utils.multiplyC(A_maps[1],A_maps[1],C_maps[1]),
+                                                                   self.clXs*self.rtau_arr[:,1][None,None,:]**2.,self.rtau_weights[t],spin=1)
+                    
+                    # 112
+                    Qs[2,ii]  = 13824./325.*self._transform_maps(self.utils.multiplyCC_asym(A_maps[0],A_maps[1],B_maps[0],B_maps[1],C_maps[0],C_maps[1]),
+                                                                   self.alXs*self.rtau_arr[:,1][None,None,:]**2.,self.rtau_weights[t])
+                    Qs[2,ii] += 13824./325.*self._transform_maps(self.utils.multiply_asym(A_maps[0],A_maps[1],B_maps[0], B_maps[1]),
+                                                                   self.blXs*self.rtau_arr[:,1][None,None,:]**2.,self.rtau_weights[t])
+                    Qs[2,ii] += 13824./325.*self._transform_maps(self.utils.multiplyC_asym(A_maps[0],A_maps[1],C_maps[0],C_maps[1]),
+                                                                   self.clXs*self.rtau_arr[:,1][None,None,:]**2.,self.rtau_weights[t],spin=1)
+                    
+                    # 122
+                    Qs[3,ii]  = 13824./325.*self._transform_maps(self.utils.multiplyCC_asym(A_maps[1],A_maps[0],B_maps[1],B_maps[0],C_maps[1],C_maps[0]),
+                                                                   self.alXs*self.rtau_arr[:,1][None,None,:]**2.,self.rtau_weights[t])
+                    Qs[3,ii] += 13824./325.*self._transform_maps(self.utils.multiply_asym(A_maps[1],A_maps[0],B_maps[1],B_maps[0]),
+                                                                   self.blXs*self.rtau_arr[:,1][None,None,:]**2.,self.rtau_weights[t])
+                    Qs[3,ii] += 13824./325.*self._transform_maps(self.utils.multiplyC_asym(A_maps[1],A_maps[0],C_maps[1],C_maps[0]),
+                                                                   self.clXs*self.rtau_arr[:,1][None,None,:]**2.,self.rtau_weights[t],spin=1)
+                    
+                if t=='gNL-deldel':
+                    if verb: print("Computing Q-derivative for gNL-deldel")
+                    
+                    # Precompute useful quantities
+                    quad_11 = self.utils.multiply2(B_maps[0],B_maps[0],C_maps[0],C_maps[0])
+                    quad_12 = self.utils.multiply2(B_maps[0],B_maps[1],C_maps[0],C_maps[1])
+                    quad_22 = self.utils.multiply2(B_maps[1],B_maps[1],C_maps[1],C_maps[1])
+                    
+                    # 111
+                    Qs[0,ii]  = 248772./2575.*self._transform_maps(self.utils.multiply2R(B_maps[0],quad_11),
+                                                                   self.blXs,self.rtau_weights[t])
+                    Qs[0,ii] += 248772./2575.*self._transform_maps(self.utils.multiply2C(C_maps[0],quad_11),
+                                                                   self.clXs,self.rtau_weights[t],spin=1)
+                    
+                    # 222
+                    Qs[1,ii]  = 248772./2575.*self._transform_maps(self.utils.multiply2R(B_maps[1],quad_22),
+                                                                   self.blXs,self.rtau_weights[t])
+                    Qs[1,ii] += 248772./2575.*self._transform_maps(self.utils.multiply2C(C_maps[1],quad_22),
+                                                                   self.clXs,self.rtau_weights[t],spin=1)
+                    
+                    # 112 
+                    Qs[2,ii]  = 82944./2575.*self._transform_maps(self.utils.multiply2R(B_maps[1],quad_11),
+                                                                  self.blXs,self.rtau_weights[t])
+                    Qs[2,ii] += 82944./2575.*self._transform_maps(self.utils.multiply2C(C_maps[1],quad_11),
+                                                                  self.clXs,self.rtau_weights[t],spin=1)
+                    Qs[2,ii] += 165888./2575.*self._transform_maps(self.utils.multiply2R(B_maps[0],quad_12),
+                                                                   self.blXs,self.rtau_weights[t])
+                    Qs[2,ii] += 165888./2575.*self._transform_maps(self.utils.multiply2C(C_maps[0],quad_12),
+                                                                   self.clXs,self.rtau_weights[t],spin=1)
+                    
+                    # 122
+                    Qs[3,ii]  = 82944./2575.*self._transform_maps(self.utils.multiply2R(B_maps[0],quad_22),
+                                                                  self.blXs,self.rtau_weights[t])
+                    Qs[3,ii] += 82944./2575.*self._transform_maps(self.utils.multiply2C(C_maps[0],quad_22),
+                                                                  self.clXs,self.rtau_weights[t],spin=1)
+                    Qs[3,ii] += 165888./2575.*self._transform_maps(self.utils.multiply2R(B_maps[1],quad_12),
+                                                                   self.blXs,self.rtau_weights[t])
+                    Qs[3,ii] += 165888./2575.*self._transform_maps(self.utils.multiply2C(C_maps[1],quad_12),
+                                                                   self.clXs,self.rtau_weights[t],spin=1)
+                    
+                if t=='tauNL-loc':
+                    # Local tauNL
+                    if verb: print("Computing Q-derivative for tauNL-loc")
+                    
+                    # Add to output array, including all permutations and weighting by (4pi)^{3/2} to correct for different conventions
+                    _add_to_Q(0,0,0,(4.*np.pi)**1.5)
+                    
+                if 'tauNL-direc' in t:
+                    # Direction-dependent tauNL
+                    n1,n3,n = np.asarray(t.split(':')[1].split(',')).astype(int)
+                    if verb: print("Computing Q-derivative for tauNL-direc(%d,%d,%d)"%(n1,n3,n))
+                    
+                    # Add to output array, incorporating symmetries
+                    if n1==n3:
+                        _add_to_Q(n1, n3, n, 1.)
                     else:
-                        # Compute F_L^beta * [P^beta_{slam} Q]_LM maps
-                        F_vecs_all = self._coll_F_PQ(coll_P_maps[beta,s], Q_maps, i_weights, s, beta, inds=inds) 
+                        _add_to_Q(n1, n3, n, 0.5)
+                        _add_to_Q(n3, n1, n, 0.5*(-1.)**(n1+n3))
                         
-                        # Compute Q4 maps
-                        Q4a_11, Q4b_11, Q4a_1del, Q4b_1del = self._compute_ideal_Q4(coll_P_maps[beta,s], Q_maps, F_vecs_all, i_weights, s, beta, del_weights=d_weights, apply_weighting=True, with_deriv=True, with_deriv_weight=True)
-                        
-                    this_Q4 = [Q4a_11, Q4b_11]
+                if 'tauNL-even' in t:
+                    # Direction-dependent even tauNL
+                    n = int(t.split(':')[1])
+                    if verb: print("Computing Q-derivative for tauNL-even(%d)"%n)
                     
-                    # Assemble score and derivative
-                    this_score = self._assemble_fish(Q4a_11, Q4b_11, sym=True).ravel()
-                    this_matrix = self._assemble_fish_ideal(Q4a_1del, Q4b_1del, sym=True)
-                    return this_Q4, this_score, this_matrix
-            
-                # Now compute estimator
-                for template in exchange_templates:
+                    # Compute the decomposition into n1, n3, n pieces
+                    uniq_n1n3ns, uniq_weights = self._decompose_tauNL_even(n)
+                    
+                    # Add to output array for each choice of (n1,n3,n), including symmetries
+                    for n_it in range(len(uniq_n1n3ns)):
+                        n1,n3,n = uniq_n1n3ns[n_it]
+                        if n1==n3:
+                            _add_to_Q(n1, n3, n, uniq_weights[n_it])
+                        else:
+                            _add_to_Q(n1, n3, n, 0.5*uniq_weights[n_it])
+                            _add_to_Q(n3, n1, n, 0.5*(-1.)**(n1+n3)*uniq_weights[n_it])
+                    
+                if 'tauNL-odd' in t:
+                    # Direction-dependent odd tauNL
+                    n = int(t.split(':')[1])
+                    if verb: print("Computing Q-derivative for tauNL-odd(%d)"%n)
+                    
+                    # Compute the decomposition into n1, n3, n pieces
+                    uniq_n1n3ns, uniq_weights = self._decompose_tauNL_odd(n)
+                    
+                    # Add to output array for each choice of (n1,n3,n)
+                    for n_it in range(len(uniq_n1n3ns)):
+                        n1,n3,n = uniq_n1n3ns[n_it]
+                        if n1==n3:
+                            _add_to_Q(n1, n3, n, uniq_weights[n_it])
+                        else:
+                            _add_to_Q(n1, n3, n, 0.5*uniq_weights[n_it])
+                            _add_to_Q(n3, n1, n, 0.5*(-1.)**(n1+n3)*uniq_weights[n_it])
                 
-                    if template=='tauNL-loc':
-                        # Local tauNL
-                        if verb: print("Computing tauNL-loc Fisher matrix derivative")
+                if 'tauNL-light' in t:
+                    # Light particle collider tauNL
+                    s = int(t.split(':')[1].split(',')[0])
+                    nu_s = float(t.split(':')[1].split(',')[1])
+                    if verb: print("Computing Q-derivative for tauNL-light(%d,%.2f)"%(s,nu_s))
+                    
+                    # Add to output array
+                    _add_to_Q_coll(-1.5+nu_s,s)
+                    
+                if 'tauNL-heavy' in t:
+                    # Heavy particle collider tauNL
+                    s = int(t.split(':')[1].split(',')[0])
+                    mu_s = float(t.split(':')[1].split(',')[1])
+                    if verb: print("Computing Q-derivative for tauNL-heavy(%d,%.2f)"%(s,mu_s))
+                    
+                    # Add to output array (only one conjugate needed here!)
+                    _add_to_Q_coll(-1.5-1.0j*mu_s,s)
+                    
+                if t=='lensing':
+                    # Lensing A_lens estimator
+                    fields1 = {'u':U_maps[0],'v':V_maps[0]}
+                    fields2 = {'u':U_maps[1],'v':V_maps[1]}
+                    if verb: print("Computing Q-derivative for lensing")
+                    
+                    def _compute_lensing_W(maps1,maps2,add_sym=False):
+                        tmp_lm = np.zeros(len(self.Lminfilt_lens),dtype=np.complex128)
+                        tmp_lm[self.Lminfilt_lens] = Ls*(Ls+1.)*self._compute_lensing_Phi(maps1,maps2,add_sym=add_sym)*self.C_phi[Ls]
+                        return self.base.to_map_spin(tmp_lm,-tmp_lm,spin=1,lmax=self.Lmax_lens)[0]
+                        
+                    # Compute all W maps
+                    Ls = self.base.l_arr[(self.base.l_arr>=self.Lmin_lens)*(self.base.l_arr<=self.Lmax_lens)]
+                    W_11 = _compute_lensing_W(fields1,fields1)
+                    W_12sym = _compute_lensing_W(fields1,fields2,add_sym=True)
+                    W_22 = _compute_lensing_W(fields2,fields2)
+                    
+                    def _get_Q(fields,W_maps):
+                        
+                        Qlm = np.zeros((1+2*self.pol,np.sum(self.lfilt)),dtype=np.complex128)
+                        ls = self.ls
+                        lpref0 = 0.5*np.sqrt(ls*(ls+1.))
+                        Cl_TTs = self.C_lens_weight['TT'][ls]
+                        if self.pol:
+                            lprefp1 = 0.25*np.sqrt((ls+2.)*(ls-1.))
+                            lprefm1 = 0.25*np.sqrt((ls-2.)*(ls+3.))
+                            Cl_TEs = self.C_lens_weight['TE'][ls]
+                            Cl_EEs = self.C_lens_weight['EE'][ls]
+                            Cl_BBs = self.C_lens_weight['BB'][ls]
+                            
+                        ## Compute first term
+                        # Spin-0
+                        input_map = np.real(fields['v'][0]*W_maps)
+                        Qlm[0] = -self.base.to_lm([input_map],lmax=self.lmax)[0][self.lminfilt]
+                        
+                        if self.pol:
+                            # Spin>0
+                            input_map = fields['v'][1]*W_maps-fields['v'][2]*W_maps.conj()
+                            lm_map_plus, lm_map_minus = self.base.to_lm_spin(input_map,input_map.conj(),spin=2,lmax=self.lmax)[:,self.lminfilt]
+                            Qlm[1] = -0.25*(lm_map_plus+lm_map_minus)
+                            Qlm[2] = 0.25j*(lm_map_plus-lm_map_minus)
+                                   
+                        ## Compute second term
+                        # Z = T
+                        input_map = fields['u'][0]*W_maps
+                        tmp_lm_plus = np.sum(np.array([1,-1])[:,None]*self.base.to_lm_spin(input_map, input_map.conj(),spin=1,lmax=self.lmax),axis=0)[self.lminfilt]
+                        # add to X = T
+                        Qlm[0] += lpref0*Cl_TTs*tmp_lm_plus
+                        if self.pol:
+                            # also add to X = E
+                            Qlm[1] += lpref0*Cl_TEs*tmp_lm_plus
+                        # Z = E
+                        if self.pol:
+                            # lam=+1
+                            input_map = -fields['u'][1]*W_maps.conj()
+                            tmp_lm_plus, tmp_lm_minus = self.base.to_lm_spin(input_map,input_map.conj(),spin=1,lmax=self.lmax)[:,self.lminfilt]
+                            base = lprefp1*(tmp_lm_plus-tmp_lm_minus)
+                            Qlm[0] += Cl_TEs*base
+                            Qlm[1] += Cl_EEs*base
+                            Qlm[2] += lprefp1*(-1.0j)*Cl_BBs*(tmp_lm_plus+tmp_lm_minus)
+                            # lam=-1
+                            input_map = fields['u'][1]*W_maps
+                            tmp_lm_plus, tmp_lm_minus = self.base.to_lm_spin(input_map,input_map.conj(),spin=3,lmax=self.lmax)[:,self.lminfilt]
+                            base = lprefm1*(tmp_lm_plus-tmp_lm_minus)
+                            Qlm[0] += Cl_TEs*base
+                            Qlm[1] += Cl_EEs*base
+                            Qlm[2] += lprefm1*(-1.0j)*Cl_BBs*(tmp_lm_plus+tmp_lm_minus)    
+                        # Z = B
+                        if self.pol:
+                            # lam=+1
+                            input_map = -fields['u'][2]*W_maps.conj()
+                            tmp_lm_plus, tmp_lm_minus = self.base.to_lm_spin(input_map,input_map.conj(),spin=1,lmax=self.lmax)[:,self.lminfilt]
+                            base = lprefp1*1.0j*(tmp_lm_plus+tmp_lm_minus)
+                            Qlm[0] += Cl_TEs*base
+                            Qlm[1] += Cl_EEs*base
+                            Qlm[2] += lprefp1*Cl_BBs*(tmp_lm_plus-tmp_lm_minus)
+                            # lam=-1
+                            input_map = fields['u'][2]*W_maps
+                            tmp_lm_plus, tmp_lm_minus = self.base.to_lm_spin(input_map,input_map.conj(),spin=3,lmax=self.lmax)[:,self.lminfilt]
+                            base = lprefm1*1.0j*(tmp_lm_plus+tmp_lm_minus)
+                            Qlm[0] += Cl_TEs*base
+                            Qlm[1] += Cl_EEs*base
+                            Qlm[2] += lprefm1*Cl_BBs*(tmp_lm_plus-tmp_lm_minus)
+                        
+                        return Qlm/2. # halving to get correct symmetries later
+                    
+                    ### Assemble outputs
+                    # 111
+                    Qs[0,ii] += 12*_get_Q(fields1, W_11)
+                    
+                    # 222
+                    Qs[1,ii] += 12*_get_Q(fields2, W_22)
+                    
+                    # 112
+                    Qs[2,ii] += 4*_get_Q(fields1, W_12sym)
+                    Qs[2,ii] += 4*_get_Q(fields2, W_11)
 
-                        # Compute derivative
-                        outs = _compute_direc_deriv_single([[0, 0, 0]], [(4.*np.pi)**1.5]) # add (4pi)^3
+                    # 122
+                    Qs[3,ii] += 4*_get_Q(fields2, W_12sym)
+                    Qs[3,ii] += 4*_get_Q(fields1, W_22)
+                    
+                    del fields1, fields2, W_11, W_22, W_12sym
+                
+                if t=='isw-lensing':
+                    # Lensing A_lens estimator
+                    fields1 = {'u':U_maps[0],'v-isw':V_isw_maps[0],'v':V_maps[0]}
+                    fields2 = {'u':U_maps[1],'v-isw':V_isw_maps[1],'v':V_maps[1]}
+                    if verb: print("Computing Q-derivative for ISW-lensing")
+                    
+                    def _compute_lensing_W_isw(maps1,maps2,add_sym=False):
+                        # Compute Phi for ISW and lensing
+                        Phi_isw = self._compute_lensing_Phi(maps1,maps2,add_sym=add_sym,isw=True)
+                        Phi_lens = self._compute_lensing_Phi(maps1,maps2,add_sym=add_sym,isw=False) 
                         
-                    elif 'tauNL-direc' in template:
-                        # Direction-dependent tauNL
-                        n1,n3,n = np.asarray(template.split(':')[1].split(','),dtype=int)
-                        if verb: print("Computing tauNL-direc:(%d,%d,%d) Fisher matrix derivative"%(n1,n3,n))
-               
-                        # Compute derivative
-                        outs = _compute_direc_deriv_single([[n1, n3, n]], [1.])
+                        # Define temporary array
+                        tmp_lm = np.zeros(len(self.Lminfilt_lens),dtype=np.complex128)
                         
-                    elif 'tauNL-even' in template:
-                        # Direction-dependent even tauNL
-                        n = int(template.split(':')[1])
-                        if verb: print("Computing tauNL-even:(%d) Fisher matrix derivative"%n)
+                        # Compute W_isw_isw                       
+                        tmp_lm[self.Lminfilt_lens] = Ls*(Ls+1.)*Phi_isw*self.C_lens_weight['TT'][Ls]
+                        W_isw_isw = self.base.to_map_spin(tmp_lm,-tmp_lm,spin=1,lmax=self.Lmax_lens)[0]
                         
-                        # Compute the decomposition into n1, n3, n pieces
-                        uniq_n1n3ns, uniq_weights = self._decompose_tauNL_even(n)
+                        # Compute W_lens_isw
+                        tmp_lm[self.Lminfilt_lens] = Ls*(Ls+1.)*Phi_isw*self.C_Tphi[Ls]
+                        W_lens_isw = self.base.to_map_spin(tmp_lm,-tmp_lm,spin=1,lmax=self.Lmax_lens)[0]
                         
-                        # Compute derivative
-                        outs = _compute_direc_deriv_single(uniq_n1n3ns, uniq_weights)
+                        # Compute W_isw_lens
+                        tmp_lm[self.Lminfilt_lens] = Ls*(Ls+1.)*Phi_lens*self.C_Tphi[Ls]
+                        W_isw_lens = self.base.to_map_spin(tmp_lm,-tmp_lm,spin=1,lmax=self.Lmax_lens)[0]
                         
-                    elif 'tauNL-odd' in template:
-                        # Direction-dependent odd tauNL
-                        n = int(template.split(':')[1])
-                        if verb: print("Computing tauNL-odd:(%d) Fisher matrix derivative"%n)
+                        # Return all
+                        return W_isw_isw, W_lens_isw, W_isw_lens
+                      
+                    # Compute all W maps
+                    Ls = self.base.l_arr[(self.base.l_arr>=self.Lmin_lens)*(self.base.l_arr<=self.Lmax_lens)]
+                    W_11 = _compute_lensing_W_isw(fields1,fields1)
+                    W_12sym = _compute_lensing_W_isw(fields1,fields2,add_sym=True)
+                    W_22 = _compute_lensing_W_isw(fields2,fields2)
+                    
+                    def _get_Q(fields,W_maps):
+                        assert not self.pol
+                        
+                        Qlm = np.zeros((1+2*self.pol,np.sum(self.lfilt)),dtype=np.complex128)
+                        ls = self.ls
+                        lpref0 = 0.5*np.sqrt(ls*(ls+1.))
+                        Cl_Tps = self.C_Tphi[ls]
+                        Cl_TTs = self.C_lens_weight['TT'][ls]
+                        # if self.pol:
+                        #     lprefp1 = 0.25*np.sqrt((ls+2.)*(ls-1.))
+                        #     lprefm1 = 0.25*np.sqrt((ls-2.)*(ls+3.))
+                        #     Cl_TEs = self.C_lens_weight['TE'][ls]
+                        #     Cl_EEs = self.C_lens_weight['EE'][ls]
+                        #     Cl_BBs = self.C_lens_weight['BB'][ls]
+                            
+                        ## Compute first term
+                        # Spin-0
+                        input_map = np.real(fields['v-isw'][0]*W_maps[0]+fields['v'][0]*W_maps[1]+fields['v-isw'][0]*W_maps[2])
+                        Qlm[0] = -self.base.to_lm([input_map],lmax=self.lmax)[0][self.lminfilt]
+                        
+                        # if self.pol:
+                        #     # Spin>0
+                        #     input_map = fields['v'][1]*W_maps-fields['v'][2]*W_maps.conj()
+                        #     lm_map_plus, lm_map_minus = self.base.to_lm_spin(input_map,input_map.conj(),spin=2,lmax=self.lmax)[:,self.lminfilt]
+                        #     Qlm[1] = -0.25*(lm_map_plus+lm_map_minus)
+                        #     Qlm[2] = 0.25j*(lm_map_plus-lm_map_minus)
+                                   
+                        ## Compute second term
+                        # Z = T
+                        
+                        # Compute ISW-ISW + ISW-Lens
+                        input_map = fields['u'][0]*(W_maps[0]+W_maps[2]) 
+                        tmp_lm_plusA = Cl_Tps*np.sum(np.array([1,-1])[:,None]*self.base.to_lm_spin(input_map, input_map.conj(),spin=1,lmax=self.lmax),axis=0)[self.lminfilt]
+                        
+                        # Repeat for Lens-ISW
+                        input_map = fields['u'][0]*W_maps[1]
+                        tmp_lm_plusB = Cl_TTs*np.sum(np.array([1,-1])[:,None]*self.base.to_lm_spin(input_map, input_map.conj(),spin=1,lmax=self.lmax),axis=0)[self.lminfilt]
+                        
+                        # add to X = T
+                        Qlm[0] += lpref0*(tmp_lm_plusA+tmp_lm_plusB)
 
-                        # Compute the decomposition into n1, n3, n pieces                 
-                        uniq_n1n3ns, uniq_weights = self._decompose_tauNL_odd(n)
+                        # if self.pol:
+                        #     # also add to X = E
+                        #     Qlm[1] += lpref0*Cl_TEs*tmp_lm_plus
+                        # # Z = E
+                        # if self.pol:
+                        #     # lam=+1
+                        #     input_map = -fields['u'][1]*W_maps.conj()
+                        #     tmp_lm_plus, tmp_lm_minus = self.base.to_lm_spin(input_map,input_map.conj(),spin=1,lmax=self.lmax)[:,self.lminfilt]
+                        #     base = lprefp1*(tmp_lm_plus-tmp_lm_minus)
+                        #     Qlm[0] += Cl_TEs*base
+                        #     Qlm[1] += Cl_EEs*base
+                        #     Qlm[2] += lprefp1*(-1.0j)*Cl_BBs*(tmp_lm_plus+tmp_lm_minus)
+                        #     # lam=-1
+                        #     input_map = fields['u'][1]*W_maps
+                        #     tmp_lm_plus, tmp_lm_minus = self.base.to_lm_spin(input_map,input_map.conj(),spin=3,lmax=self.lmax)[:,self.lminfilt]
+                        #     base = lprefm1*(tmp_lm_plus-tmp_lm_minus)
+                        #     Qlm[0] += Cl_TEs*base
+                        #     Qlm[1] += Cl_EEs*base
+                        #     Qlm[2] += lprefm1*(-1.0j)*Cl_BBs*(tmp_lm_plus+tmp_lm_minus)    
+                        # # Z = B
+                        # if self.pol:
+                        #     # lam=+1
+                        #     input_map = -fields['u'][2]*W_maps.conj()
+                        #     tmp_lm_plus, tmp_lm_minus = self.base.to_lm_spin(input_map,input_map.conj(),spin=1,lmax=self.lmax)[:,self.lminfilt]
+                        #     base = lprefp1*1.0j*(tmp_lm_plus+tmp_lm_minus)
+                        #     Qlm[0] += Cl_TEs*base
+                        #     Qlm[1] += Cl_EEs*base
+                        #     Qlm[2] += lprefp1*Cl_BBs*(tmp_lm_plus-tmp_lm_minus)
+                        #     # lam=-1
+                        #     input_map = fields['u'][2]*W_maps
+                        #     tmp_lm_plus, tmp_lm_minus = self.base.to_lm_spin(input_map,input_map.conj(),spin=3,lmax=self.lmax)[:,self.lminfilt]
+                        #     base = lprefm1*1.0j*(tmp_lm_plus+tmp_lm_minus)
+                        #     Qlm[0] += Cl_TEs*base
+                        #     Qlm[1] += Cl_EEs*base
+                        #     Qlm[2] += lprefm1*Cl_BBs*(tmp_lm_plus-tmp_lm_minus)
                         
-                        # Compute derivative
-                        outs = _compute_direc_deriv_single(uniq_n1n3ns, uniq_weights)                    
+                        return Qlm/2. # halving to get correct symmetries later
                     
-                    elif 'tauNL-light' in template:
-                        # Light particle collider tauNL
-                        s = int(template.split(':')[1].split(',')[0])
-                        nu_s = float(template.split(':')[1].split(',')[1])
-                        if verb: print("Computing tauNL-light:(%d,%.2f) Fisher matrix derivative"%(s,nu_s))
-                        
-                        # Compute derivative
-                        outs = _compute_coll_deriv_single(-1.5+nu_s, s)
-                        
-                    elif 'tauNL-heavy' in template:
-                        # Heavy particle collider tauNL
-                        s = int(template.split(':')[1].split(',')[0])
-                        mu_s = float(template.split(':')[1].split(',')[1])
-                        if verb: print("Computing tauNL-heavy(%d,%.2f) Fisher matrix derivative"%(s,mu_s))
-                        
-                        # Compute derivative
-                        outs = _compute_coll_deriv_single(-1.5-1.0j*mu_s, s)
+                    ### Assemble outputs
+                    # 111
+                    Qs[0,ii] += 12*_get_Q(fields1, W_11)
                     
-                    else:
-                        raise Exception("Template %s not implemented!"%template)
-                        
-                    all_Q4[template].append(outs[0])
-                    init_score[template] += outs[1]/N_fish_optim
-                    deriv_matrix[template] += outs[2]/N_fish_optim
+                    # 222
+                    Qs[1,ii] += 12*_get_Q(fields2, W_22)
                     
-            # Add to output dictionary
-            for template in exchange_templates:
-                output[template] = init_score[template], deriv_matrix[template], all_Uinv_lms, all_Q4[template]
+                    # 112
+                    Qs[2,ii] += 4*_get_Q(fields1, W_12sym)
+                    Qs[2,ii] += 4*_get_Q(fields2, W_11)
+
+                    # 122
+                    Qs[3,ii] += 4*_get_Q(fields2, W_12sym)
+                    Qs[3,ii] += 4*_get_Q(fields1, W_22)
+                    
+                    del fields1, fields2, W_11, W_22, W_12sym
+                
+                if t=='point-source':
+                    if verb: print("Computing Q-derivative for point sources")
+                    
+                    def point_source_Q(product_map):
+                        # Output array
+                        q = np.zeros((1+2*self.pol,np.sum(self.lminfilt)),dtype=np.complex128,order='C')
+                        # Fill X=T element only!
+                        q[0] = self.base.to_lm(product_map[None].real,lmax=self.lmax)[0,self.lminfilt]
+                        return q
+
+                    # Compute all fields 
+                    Qs[0,ii]  = point_source_Q(U_maps[0][0]**3)
+                    Qs[1,ii]  = point_source_Q(U_maps[1][0]**3)
+                    Qs[2,ii]  = point_source_Q(U_maps[0][0]**2*U_maps[1][0])
+                    Qs[3,ii]  = point_source_Q(U_maps[1][0]**2*U_maps[0][0])
+                    
+            if weighting=='Ainv' and verb: print("Applying S^-1 weighting to output")
+            for qindex in range(4):
+                self._weight_Q_maps(Qs[qindex], weighting)
             
-        return output
+            return Qs.reshape(4,len(self.templates),-1)
 
-    def _compute_ideal_Q4(self, Pn1_maps, Q_maps, F_vecs, r_weights, n1=0, beta_coll=np.inf, conjPn1_maps=[], del_weights=[], apply_weighting=False, with_deriv=False, with_deriv_weight=False, inds=[]):
+        # Compute Q4 maps
+        if verb: print("\n# Computing Q4 map for S^-1 weighting")
+        Q4_Sinv = compute_Q4('Sinv')
+        if verb: print("\n# Computing Q4 map for A^-1 weighting")
+        Q4_Ainv = compute_Q4('Ainv')
+        
+        # Assemble Fisher matrix
+        if verb: print("Assembling Fisher matrix")
+        
+        # Compute Fisher matrix as an outer product
+        fish = self._assemble_fish(Q4_Sinv, Q4_Ainv, sym=False)
+        if verb: print("\n# Fisher matrix contribution %d computed successfully!"%seed)
+        
+        return fish
+    
+    def compute_fisher(self, N_it, verb=False):
         """
-        Assemble and return an array of ideal Q4 maps and derivatives. This is specific to the optimization routines and applies only to exchange trispectra.
-
-
-        The outputs are either Q(b) or S^-1Q(b), or the derivatives.
+        Compute the Fisher matrix using N_it realizations. These are run in serial (since the code is already parallelized).
+        
+        For high-dimensional problems, it is usually preferred to split the computation across a cluster with MPI, calling compute_fisher_contribution for each instead of this function.
         """
-        if len(inds)==0:
-            inds = np.arange(self.N_r, dtype=np.int32)
+        # Initialize output
+        fish = np.zeros((len(self.templates),len(self.templates)))
         
-        ### Assemble Q4 maps, with relevant symmetries
-        if with_deriv:
-            Q4, dQ4 = self._get_Q4_perms(Pn1_maps, Q_maps, F_vecs, r_weights, n1, beta_coll, conjPn1_maps, with_deriv=True, inds=inds, del_weights=del_weights)
-        else:
-            Q4 = self._get_Q4_perms(Pn1_maps, Q_maps, F_vecs, r_weights, n1, beta_coll, conjPn1_maps, with_deriv=False, inds=inds)
-        Q4 = Q4[:,None,...]
+        # Iterate over N_it seeds
+        for seed in range(N_it):
+            print("Computing Fisher contribution %d of %d"%(seed+1,N_it))
+            fish += self.compute_fisher_contribution(seed, verb=verb*(seed==0))/N_it
         
-        # Assemble output
-        output = [Q4.reshape(4,1,-1)]
-        
-        if apply_weighting: 
-            output.append(apply_ideal_weight(Q4, self.Cinv, self.m_weight, self.base.nthreads))
-        
-        if with_deriv:
-            output.append(dQ4.reshape(4,len(inds),-1))
+        # Store matrix in class attributes
+        self.fish = fish
+        self.inv_fish = np.linalg.inv(fish)
 
-            if with_deriv_weight:
-                output.append(apply_ideal_weight(dQ4, self.Cinv, self.m_weight, self.base.nthreads))
+        return fish
+    
+    ### WRAPPER
+    def Tl_full(self, data, fish=[], include_disconnected_term=True, verb=False, input_type='map'):
+        """
+        Compute the quasi-optimal trispectrum estimator. This is a wrapper of Tl_numerator, including the Fisher matrix multiplication.
         
-        return output
+        The code either uses pre-computed Fisher matrices or reads them in on input. 
+        
+        We can also optionally switch off the disconnected terms.
+        """
+        if verb: print("")
+
+        if len(fish)!=0:
+            self.fish = fish
+            self.inv_fish = np.linalg.inv(fish)
+
+        if not hasattr(self,'inv_fish'):
+            raise Exception("Need to compute Fisher matrix first!")
+        
+        # Compute numerator
+        Tl_num = self.Tl_numerator(data, verb=verb, include_disconnected_term=include_disconnected_term, input_type=input_type)
+
+        # Apply normalization
+        Tl_out = np.matmul(self.inv_fish,Tl_num)
+
+        # Create output dictionary
+        Tl_dict = {}
+        index = 0
+        # Iterate over fields
+        for t in self.templates:
+            Tl_dict[t] = Tl_out[index]
+            index += 1
+            
+        return Tl_dict
+
