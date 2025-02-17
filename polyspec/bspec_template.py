@@ -3,7 +3,9 @@
 
 import numpy as np
 import time
+from scipy.special import gamma, p_roots, lpmn
 from .cython.k_integrals import *
+from .cython.ideal_fisher import *
 from .cython.fNL_utils import *
 
 class BSpecTemplate():
@@ -18,13 +20,13 @@ class BSpecTemplate():
     - templates: types of templates to compute e.g. [fNL-loc, isw-lensing]
     - k_arr, Tl_arr: k-array, plus T- and (optionally) E-mode transfer functions for all ell. Required for all primordial templates.
     - lmin, lmax: minimum/maximum ell (inclusive)
-    - r_arr: integration grid for the radial axis
     - ns, As, k_pivot: primordial power spectrum parameters
+    - r_values, r_weights: radial sampling points and weights for 1-dimensional integrals
     - C_Tphi: cross spectrum of temperature and lensing  [C^Tphi_0, C^Tphi_1, etc.]. Required if 'isw-lensing' is in templates.
     - C_lens_weight: dictionary of lensed power spectra (TT, TE, etc.). Required if 'isw-lensing' is in templates.
     - r_star, r_hor: Comoving distance to last-scattering and the horizon (default: Planck 2018 values).
     """
-    def __init__(self, base, mask, applySinv, templates, lmin, lmax,  k_arr=[], Tl_arr=[], r_arr=[], ns=0.96, As=2.1e-9, k_pivot=0.05, C_Tphi=[], C_lens_weight = {}, r_star=None, r_hor=None):
+    def __init__(self, base, mask, applySinv, templates, lmin, lmax,  k_arr=[], Tl_arr=[], r_arr=[], ns=0.96, As=2.1e-9, k_pivot=0.05, r_values = [], r_weights = {}, C_Tphi=[], C_lens_weight = {}, r_star=None, r_hor=None):
         # Read in attributes
         self.base = base
         self.mask = mask
@@ -110,27 +112,21 @@ class BSpecTemplate():
         self.base.time_sht = 0.
         
         # Check sampling points
-        # if len(r_values)==0 and self.ints_1d:
-        #     print("# No input radial sampling points supplied; these can be computed with the optimize_radial_sampling_1d() function\n") 
-        #     self.N_r = 0
-        # elif self.ints_1d:
-        #     print("Reading in precomputed radial integration points")
+        if len(r_values)==0 and self.ints_1d:
+            print("# No input radial sampling points supplied; these can be computed with the optimize_radial_sampling_1d() function\n") 
+            self.N_r = 0
+        elif self.ints_1d:
+            print("Reading in precomputed radial integration points")
             
-        #     assert len(r_values)>0, "Must supply radial sampling points!"
-        #     for t in templates:
-        #         if (t in self.all_templates_1d) or ('tauNL-direc' in t) or ('tauNL-even' in t) or ('tauNL-odd' in t):
-        #             assert t in r_weights.keys(), "Must supply weight for template %s"%t
-        #     self.r_arr = r_values
-        #     self.N_r = len(self.r_arr)
-        #     self.r_weights = r_weights
-        # else:
-        #     self.N_r = 0
-        print("TODO: ADD OPTIMIZATION!")
-        dr = (r_arr[1:]-r_arr[:-1])
-        dr = np.append(dr, dr[-1])
-        self.r_weights = {t: r_arr**2*dr for t in self.templates if 'fNL' in t}
-        self.r_arr = r_arr
-        self.N_r = len(r_arr)
+            assert len(r_values)>0, "Must supply radial sampling points!"
+            for t in templates:
+                if (t in self.all_templates_1d) or ('tauNL-direc' in t) or ('tauNL-even' in t) or ('tauNL-odd' in t):
+                    assert t in r_weights.keys(), "Must supply weight for template %s"%t
+            self.r_arr = r_values
+            self.N_r = len(self.r_arr)
+            self.r_weights = r_weights
+        else:
+            self.N_r = 0
         
         # Precompute k-space integrals if r arrays have been supplied
         if self.N_r>0:
@@ -272,8 +268,6 @@ class BSpecTemplate():
             if hasattr(self, 'plXs'): delattr(self, 'plXs')
             if hasattr(self, 'qlXs'): delattr(self, 'qlXs')
         
-        print("\nComputing p, q integrals")
-
         # Precompute all spherical Bessel functions on a regular grid
         print("Precomputing Bessel functions")
         max_kr = max(self.k_arr)*max(self.r_arr)
@@ -582,6 +576,11 @@ class BSpecTemplate():
                 self.load_sim_data = lambda ii: self._process_sim(self.mask*self.base.generate_data(int(1e5)+ii, Cl_input=Cl_input, deconvolve_beam=False))
     
     ### FISHER MATRIX FUNCTIONS
+    @_timer_func('fish_outer')
+    def _assemble_fish(self, Q3_a, Q3_b, sym=False):
+        """Compute Fisher matrix between two Q arrays as an outer product. This is parallelized across the l,m axis."""
+        return self.utils.outer_product(Q3_a, Q3_b, sym)
+
     def _weight_Q_maps(self, tmp_Q, weighting='Ainv'):
         """Apply inplace weighting to a Q map to form output array. This includes factors of S^-1.P if necessary."""
         
@@ -615,10 +614,34 @@ class BSpecTemplate():
         else:
             raise Exception(f"Wrong spin s = {spin}!")
 
-    @_timer_func('fish_outer')
-    def _assemble_fish(self, Q3_a, Q3_b, sym=False):
-        """Compute Fisher matrix between two Q arrays as an outer product. This is parallelized across the l,m axis."""
-        return self.utils.outer_product(Q3_a, Q3_b, sym)
+    def _compute_fisher_derivatives(self, templates, N_fish_optim=None, verb=False):
+        """Compute the derivative of the ideal Fisher matrix with respect to the weights for each template of interest."""
+
+        # Output array
+        output = {}
+        
+        # Compute arrays
+        # NB: using exact Gauss-Legendre integration in mu
+        [mus, w_mus] = p_roots(2*self.lmax+1)
+        ls = np.arange(self.lmin,self.lmax+1)
+        legs = np.asarray([lpmn(0,self.lmax,mus[i])[0][0,self.lmin:] for i in range(len(mus))])
+            
+        t_init = time.time()
+        for template in templates:
+                
+            if template=='fNL-loc':
+                if verb: print("\tComputing fNL-loc Fisher matrix derivative exactly")
+                deriv_matrix = np.asarray(fisher_deriv_fNL_loc(self.plXs, self.qlXs, self.quad_weights_1d, np.asarray(self.base.beam[:,None]*self.base.beam[None,:]*self.base.inv_Cl_tot_mat,order='C'), 
+                                    legs, w_mus, self.lmin, self.lmax, self.base.nthreads))
+                
+            else:
+                raise Exception("Template %s not implemented!"%template)
+                
+            output[template] = np.sum(deriv_matrix), deriv_matrix
+
+        self.timers['analytic_fisher'] += time.time()-t_init
+
+        return output
 
     ### NUMERATOR
     @_timer_func('numerator')
@@ -714,6 +737,196 @@ class BSpecTemplate():
 
         return b_num
 
+    ### OPTIMIZATION
+    @_timer_func('optimization')
+    def optimize_radial_sampling_1d(self, reduce_r=1, tolerance=1e-3, N_split=None, split_index=None, initial_r_points=None, verb=False):
+        """
+        Compute the 1D radial sampling points and weights via optimization (as in Smith & Zaldarriaga 06), up to some tolerance in the Fisher distance.
+        Optimization will be done for each template, analytically computing the 'distance' between template approximations
+        
+        Main Inputs:
+            - reduce_r: Downsample the number of points in the starting radial integral grid (default: 1)
+            - tolerance: Convergence threshold for the optimization (default 1e-3). This indicates the approximate error in the Fisher matrix induced by the optimization.
+            
+        For large problems, it is too expensive to optimize the whole matrix at once. Instead, we can split the optimization into N_split pieces, each of which is optimized separately.
+        Following this, we perform a final optimization of all N_split components, using the union of all previously obtained radial points. 
+        
+        Additional Inputs (for chunked computations):
+            - N_split (optional): Number of chunks to split the optimization into. If None, no splitting is performed.
+            - split_index (optional): Index of the chunk to optimize. 
+            - initial_r_points (optional): Starting set of radial points (used for the final optimization step).
+        
+        """
+        assert self.ints_1d, "No 1D optimization is required for these templates!"
+        t_init = time.time()
+
+        # Check precision parameters
+        assert reduce_r>0, "reduce_r parameter must be positive"
+        
+        if reduce_r<0.5:
+            print("## Caution: very dense r-sampling requested; computation may be very slow") 
+        if reduce_r>3:
+            print("## Caution: very sparse r-sampling requested; computation may be inaccurate")
+        
+        # Create radial array
+        r_raw = np.asarray(list(np.arange(1,self.r_star*0.95,50*reduce_r))+list(np.arange(self.r_star*0.95,self.r_hor*1.05,5*reduce_r))+list(np.arange(self.r_hor*1.05,self.r_hor+5000,50*reduce_r)))
+        r_init = 0.5*(r_raw[1:]+r_raw[:-1])
+        self.quad_weights_1d = r_init**2*np.diff(r_raw)
+        r_weights = {}
+        
+        # Partition the radial indices if required or read in precomputed points
+        if initial_r_points is not None:
+            assert split_index is None, "Cannot specify both initial_r_points and index_split"
+            assert len(initial_r_points)==len(np.unique(initial_r_points)), "initial_r_points cannot contain repeated points"
+            inds = np.asarray([np.where(r==r_init)[0][0] for r in initial_r_points])
+            r_init = r_init[inds]
+            self.quad_weights_1d = self.quad_weights_1d[inds]
+        else:
+            if N_split is not None:
+                print("Partitioning sampling grid into %d pieces"%(N_split))                
+                r_init = r_init[split_index::N_split]
+                self.quad_weights_1d = self.quad_weights_1d[split_index::N_split]
+        
+        # Precompute k-integrals with initial r grid
+        self.r_arr = r_init
+        self.N_r = len(r_init)
+        print("# Computing k integrals with fiducial radial grid")
+        self._prepare_templates(ints_1d=True)
+        
+        # Reorder templates (keeping only those that require 1D optimization)
+        ordered_templates = [tem for tem in self.templates if tem in self.all_templates_1d]
+        
+        # Create list of radial indices in the optimized representation
+        inds = []
+        inds_init = np.arange(self.N_r)
+        
+        # Compute all Fisher matrix derivatives of interest
+        if verb: print("Computing all Fisher matrix derivatives")
+        derivs = self._compute_fisher_derivatives(ordered_templates, verb=verb)
+        
+        # Save ideal Fisher matrices
+        if not hasattr(self, 'ideal_fisher'):
+            self.ideal_fisher = {}
+        for t in ordered_templates:
+            self.ideal_fisher[t] = derivs[t][0]
+        
+        for template in ordered_templates:
+            
+            if verb: print("\nRunning optimization for template %s"%template)
+            
+            # Compute Fisher matrix derivative
+            init_score, deriv_matrix = derivs[template][0], derivs[template][1]
+            if verb: print("Initial score: %.2e"%init_score)
+            
+            def _compute_score(w_vals, full_score=False):
+                """
+                Compute the Fisher distance between templates given weights w_vals. This optionally computes the gradients.
+                """
+                if full_score:
+                    return np.sum(G_mat), np.sum(np.outer(w_vals,w_vals)*deriv_matrix[inds][:,inds])
+                else:
+                    return np.sum(G_mat)
+                
+            def _test_inds(inds, score_old, w_vals):
+                """Test the current set of indices"""
+                score = _compute_score(w_vals)
+                return score, w_vals
+            
+            # Check zeroth iteration
+            if len(inds)!=0:
+                # Compute quadratic weights
+                notinds = [i for i in np.arange(self.N_r) if i not in inds]
+                inv_deriv = np.linalg.inv(deriv_matrix[inds][:,inds])
+                G_mat = deriv_matrix[notinds][:,notinds]-deriv_matrix[inds][:,notinds].T@inv_deriv@deriv_matrix[inds][:,notinds]
+                w_vals = (1+np.sum(inv_deriv@deriv_matrix[inds][:,notinds],axis=1))
+                
+                # Compute score
+                score, w_vals = _test_inds(inds, init_score, w_vals)
+                if verb: print("Unoptimized relative score: %.2e"%(score/init_score))
+            else:
+                score = init_score
+                w_vals = []
+                
+            # Set up iteration
+            if score/init_score >= tolerance:
+                
+                # Define starting indices
+                if len(inds)==0:
+                    next_ind = np.argsort(np.sum(deriv_matrix,axis=1)**2/np.diag(deriv_matrix))[-1]
+                else:
+                    next_ind = inds_init[notinds][np.argsort(np.sum(G_mat,axis=1)**2/np.diag(G_mat))[-1]]
+                inds.append(next_ind)
+                print(inds)
+                
+                # Set-up memory
+                w_vals_old = w_vals
+                score_old = score
+                    
+                # Iterate until convergence
+                for iit,iteration in enumerate(range(len(inds),self.N_r)):
+                    
+                    # Define indices  
+                    inds[-1] = next_ind
+                    notinds = [i for i in np.arange(self.N_r) if i not in inds]
+                    
+                    # Set-up weights
+                    inv_deriv = np.linalg.inv(deriv_matrix[inds][:,inds])
+                    G_mat = deriv_matrix[notinds][:,notinds]-deriv_matrix[inds][:,notinds].T@inv_deriv@deriv_matrix[inds][:,notinds]
+                    
+                    # Compute optimal quadratic weights
+                    w_vals = (1+np.sum(inv_deriv@deriv_matrix[inds][:,notinds],axis=1))
+                      
+                    # Compute score
+                    score, w_vals = _test_inds(inds, score_old, w_vals)
+                    if verb: print("Iteration %d, relative score: %.2e, old score: %.2e"%(iteration, score/init_score, score_old/init_score))
+                    
+                    # Check for numerical errors
+                    if score<0:
+                        print("## Score is negative; this indicates a numerical error!")
+                        break
+                    
+                    # Finish if converged
+                    if score/init_score < tolerance:
+                        break
+                    
+                    # Update memory when score is accepted
+                    w_vals_old = w_vals
+                    score_old = score
+                    
+                    # Compute indices for next iteration
+                    next_ind = inds_init[notinds][np.argsort(np.sum(G_mat,axis=1)**2/np.diag(G_mat))[-1]]
+                    inds.append(next_ind)
+                    
+            if len(G_mat)==0:
+                raise Exception("Failed to converge after %d iterations; this indicates a bug!"%N_fish_optim)
+                
+            if verb: print("\nScore threshold met with %d indices"%len(inds))
+            w_opt = np.asarray(w_vals.copy())
+            
+            # Check final Fisher matrix
+            score, fish = _compute_score(w_opt, full_score=True)
+            if verb: print("Ideal %s Fisher: %.4e (initial), %.4e (optimized). Relative score: %.2e\n"%(template, init_score, fish, score/init_score))
+
+            # Store attributes
+            r_weights[template] = w_opt*self.quad_weights_1d[inds]
+        
+        # Store attributes
+        self.r_arr = r_init[inds]
+        self.N_r = len(self.r_arr)
+        self.r_weights = {}
+        for template in ordered_templates:
+            # add weights, padding with zeros
+            self.r_weights[template] = np.zeros(len(w_opt)) 
+            self.r_weights[template][:len(r_weights[template])] = r_weights[template]
+        
+        # Precompute k-space integrals with new radial integration
+        if verb: print("Computing k integrals with optimized radial grid")
+        self._prepare_templates(ints_1d=True)
+
+        print("\nOptimization complete after %.2f seconds"%(time.time()-t_init))
+        
+        return self.r_arr, self.r_weights
+        
     ### NORMALIZATION
     @_timer_func('fisher')
     def compute_fisher_contribution(self, seed, verb=False):

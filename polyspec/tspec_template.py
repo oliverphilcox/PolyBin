@@ -2968,7 +2968,7 @@ class TSpecTemplate():
         
         The other input parameters are deprecated and may be removed in future releases.
         """
-        assert self.ints_1d, "Only 2D sampling is required for these templates!"
+        assert self.ints_1d, "No 1D optimization is required for these templates!"
         t_init = time.time()
 
         # Check precision parameters

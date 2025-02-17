@@ -747,6 +747,46 @@ cpdef double[:,::1] fisher_deriv_gNL_con(double[:,:,::1] rlXs, double[:] weights
 @cython.boundscheck(False)
 @cython.wraparound(False)
 @cython.cdivision(True)
+cpdef double[:,::1] fisher_deriv_fNL_loc(double[:,:,::1] plXs, double[:,:,::1] qlXs, double[:] weights, double[:,:,::1] inv_Cl_mat,
+                                   double[:,::1] legs, double[:] w_mus, int lmin, int lmax, int nthreads):
+    """Compute the exact Fisher matrix for the fNL^{loc} template."""
+
+    cdef int nl = lmax+1-lmin, nr = len(plXs[0,0]), npol = len(plXs[0]), nmu = len(w_mus)
+    cdef int il, ir, ijr, imu, jr, ipol, jpol
+    cdef double XYsum, lsum, musum
+    cdef double[:] twol_arr = np.zeros(nl,dtype=np.float64)
+    cdef double[:,:,::1] zetaPP_l = np.zeros((nl,nr,nr),dtype=np.float64)
+    cdef double[:,:,::1] zetaPQ_l = np.zeros((nl,nr,nr),dtype=np.float64)
+    cdef double[:,:,::1] zetaQQ_l = np.zeros((nl,nr,nr),dtype=np.float64)
+    cdef double[:,:,::1] zeta_l = np.zeros((nl,nr,nr),dtype=np.float64)
+    cdef double[:,::1] deriv_matrix = np.zeros((nr,nr),dtype=np.float64)
+    cdef double pref = dpow(4.*M_PI,2.)*18./25.
+    
+    # Precompute r-dependent and l-dependent factors
+    for il in xrange(nl):
+        twol_arr[il] = (2.*il+2*lmin+1.)
+
+    # Compute (2l+1) u^Y S^-1 v^X for each r, r', l
+    for il in prange(nl, nogil=True,schedule='static',num_threads=nthreads):
+        for ir in xrange(nr):
+            for jr in xrange(nr):
+                for ipol in xrange(npol):
+                    for jpol in xrange(npol):
+                        zetaPP_l[il,ir,jr] += twol_arr[il]*inv_Cl_mat[ipol,jpol,il+lmin]*plXs[il+lmin,ipol,ir]*plXs[il+lmin,jpol,jr]
+                        zetaPQ_l[il,ir,jr] += twol_arr[il]*inv_Cl_mat[ipol,jpol,il+lmin]*plXs[il+lmin,ipol,ir]*qlXs[il+lmin,jpol,jr]
+                        zetaQQ_l[il,ir,jr] += twol_arr[il]*inv_Cl_mat[ipol,jpol,il+lmin]*qlXs[il+lmin,ipol,ir]*qlXs[il+lmin,jpol,jr]
+
+    # Compute sum over l, mu for each r, r'
+    for ijr in prange(nr*nr, nogil=True,schedule='static',num_threads=nthreads):
+        ir = ijr//nr
+        jr = ijr%nr
+        deriv_matrix[ir,jr] = pref*weights[ir]*weights[jr]*_zeta_sum_symB(zetaPP_l[:,ir,jr], zetaPQ_l[:,ir,jr], zetaPQ_l[:,jr,ir], zetaQQ_l[:,ir,jr], legs, w_mus, nmu, nl)
+
+    return deriv_matrix
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+@cython.cdivision(True)
 cpdef double[:,::1] fisher_deriv_gNL_loc(double[:,:,::1] plXs, double[:,:,::1] qlXs, double[:] weights, double[:,:,::1] inv_Cl_mat,
                                    double[:,::1] legs, double[:] w_mus, int lmin, int lmax, int nthreads):
     """Compute the exact Fisher matrix for the gNL^{loc} template."""
@@ -803,6 +843,28 @@ cdef double _zeta_sum(double[:] zetaAA_l, double[:,::1] legs, double[:] w_mus, i
         for il in xrange(nl):
             lsum += zetaAA_l[il]*legs[imu,il]
         musum += dpow(lsum,4.)*w_mus[imu]
+    return musum
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+@cython.cdivision(True)
+cdef double _zeta_sum_symB(double[:] zetaAA_l, double[:] zetaAB_l, double[:] zetaBA_l, double[:] zetaBB_l, 
+                          double[:,::1] legs, double[:] w_mus, int nmu, int nl) noexcept nogil:
+    """Utility function to sum over l, mu in the exact estimators. This is a specialized version for the bispectrum."""
+    cdef int il,imu
+    cdef double musum, AAsum, ABsum, BAsum, BBsum
+    musum = 0.
+    for imu in xrange(nmu):
+        AAsum = 0.
+        ABsum = 0.
+        BAsum = 0.
+        BBsum = 0.
+        for il in xrange(nl):
+            AAsum += zetaAA_l[il]*legs[imu,il]
+            ABsum += zetaAB_l[il]*legs[imu,il]
+            BAsum += zetaBA_l[il]*legs[imu,il]
+            BBsum += zetaBB_l[il]*legs[imu,il]
+        musum += (AAsum*AAsum*BBsum+2*ABsum*BAsum*AAsum)*w_mus[imu]
     return musum
 
 @cython.boundscheck(False)
