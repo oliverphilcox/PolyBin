@@ -330,7 +330,7 @@ class TSpecTemplate():
             # Reshape and store
             self.C_Tphi = C_Tphi[:np.max([self.lmax,self.Lmax_lens])+1]
             self.C_lens_weight = {k: C_lens_weight[k][:np.max([self.lmax,self.Lmax_lens])+1] for k in C_lens_weight.keys()}
-            self.to_compute.append(['u','v','v-isw'])
+            self.to_compute.append(['u','v','v-isw','s-isw'])
         if 'point-source' in templates:
             self.to_compute.append(['u'])
                
@@ -985,6 +985,35 @@ class TSpecTemplate():
         # Return output
         return V
     
+    @_timer_func('map_transforms')
+    def _compute_isw_S_map(self, h_lm_filt):
+        """
+        Compute lensing S map from a given data vector. These are used in the trispectrum numerators.
+        """
+        
+        # Output array
+        S = np.zeros((2,self.base.Npix),dtype=np.complex128,order='C')
+            
+        if not self.pol:
+            # Compute lambda=0 map
+            pref = self.ls*(self.ls+1.)*self.C_lens_weight['TT'][self.ls]
+            inp_lm = np.zeros(len(self.lminfilt),dtype=np.complex128)
+            inp_lm[self.lminfilt] = pref*h_lm_filt[0]
+            S[0] = self.base.to_map(inp_lm[None],lmax=self.lmax)[0] # h_lm Y_lm l(l+1)C^TT(l)
+            
+            # Compute lambda=+1, lambda=-1 map
+            pref = np.sqrt(self.ls*(self.ls+1.)*(self.ls-1)*(self.ls+2.))*self.C_lens_weight['TT'][self.ls]
+            inp_lm = np.zeros(len(self.lminfilt),dtype=np.complex128)
+            inp_lm[self.lminfilt] = pref*h_lm_filt[0]
+            S[1] = self.base.to_map_spin(inp_lm, inp_lm, 2, lmax=self.lmax)[0] # h_lm (+2)Y_lm Sqrt[l(l+1)(l-1)(l+2)]C^TT(l)
+            del pref, inp_lm
+        
+        else:
+            raise Exception("Not yet implemented!")
+            
+        # Return output
+        return S
+    
     def _filter_pair(self, input_maps, filtering = 'Q'):
         """Compute the processed field with a given filtering for a pair of input maps."""
         
@@ -1054,6 +1083,9 @@ class TSpecTemplate():
         elif filtering=='V-ISW':
             return np.asarray([self._compute_lensing_V_map(imap, isw=True) for imap in input_maps], order='C')        
         
+        elif filtering=='S-ISW':
+            return np.asarray([self._compute_isw_S_map(imap) for imap in input_maps], order='C')        
+        
         else:
             raise Exception("Filtering %s is not implemented!"%filtering)
 
@@ -1118,6 +1150,9 @@ class TSpecTemplate():
             
         if 'v-isw' in self.to_compute:
             output['v-isw'] = self._compute_lensing_V_map(input_map, isw=True)
+        
+        if 's-isw' in self.to_compute:
+            output['s-isw'] = self._compute_isw_S_map(input_map)
         
         return output
     
@@ -2466,19 +2501,25 @@ class TSpecTemplate():
                 # ISW-Lensing template
                 if verb: print("Computing ISW-lensing template")
 
-                ## Compute estimator
+                ## Compute quadratic lensing estimator
                 Phi_dd_isw = self._compute_lensing_Phi(proc_maps,proc_maps,isw=True)
                 Phi_dd_lens = self._compute_lensing_Phi(proc_maps,proc_maps,isw=False)
                 Ls = self.base.l_arr[(self.base.l_arr>=self.Lmin_lens)*(self.base.l_arr<=self.Lmax_lens)]
                 Ms = self.base.m_arr[(self.base.l_arr>=self.Lmin_lens)*(self.base.l_arr<=self.Lmax_lens)]
                 t_init = time.time()
                 
-                # Compute products
+                # Compute exchange products
                 Phi_sq =  Phi_dd_isw*Phi_dd_isw.conj()*self.C_lens_weight['TT'][Ls]
                 Phi_sq += 2.*np.real(Phi_dd_lens*Phi_dd_isw.conj())*self.C_Tphi[Ls]
                 t4_num[ii] = 1./24.*np.sum(Ls*(Ls+1.)*Phi_sq*(1.+(Ms>0))).real*12.
                 self.timers['lensing_summation'] += time.time()-t_init
-               
+                
+                # Compute contact terms
+                t_init = time.time()
+                assert not self.pol
+                t4_num[ii] += lensing_isw_sum_sym(proc_maps['u'], proc_maps['v-isw'], proc_maps['s-isw'], self.base.nthreads)/4.*self.base.A_pix
+                self.timers['lensing_summation'] += time.time()-t_init
+                
             if t=='point-source':
                 # Point-source template
                 t_init = time.time()
@@ -2886,6 +2927,7 @@ class TSpecTemplate():
                         Phi_sum =  (4.*Phi_aa_isw*Phi_dd_isw.conj()+2.*Phi_ad_isw*Phi_ad_isw.conj())*self.C_lens_weight['TT'][Ls]
                         Phi_sum += (4.*Phi_aa_isw*Phi_dd_lens.conj()+2.*Phi_ad_isw*Phi_ad_lens.conj())*self.C_Tphi[Ls]
                         Phi_sum += (4.*Phi_aa_lens*Phi_dd_isw.conj()+2.*Phi_ad_lens*Phi_ad_isw.conj())*self.C_Tphi[Ls]
+                        contact_sum = lensing_isw_sum(proc_maps['u'], this_proc_a_maps['u'], proc_maps['v-isw'], this_proc_a_maps['v-isw'], proc_maps['s-isw'], this_proc_a_maps['s-isw'], self.base.nthreads)
                         del Phi_ad_isw
                         
                         # Second set of fields
@@ -2896,24 +2938,28 @@ class TSpecTemplate():
                         Phi_sum += (4.*Phi_bb_isw*Phi_dd_isw.conj()+2.*Phi_bd_isw*Phi_bd_isw.conj())*self.C_lens_weight['TT'][Ls]
                         Phi_sum += (4.*Phi_bb_isw*Phi_dd_lens.conj()+2.*Phi_bd_isw*Phi_bd_lens.conj())*self.C_Tphi[Ls]
                         Phi_sum += (4.*Phi_bb_lens*Phi_dd_isw.conj()+2.*Phi_bd_lens*Phi_bd_isw.conj())*self.C_Tphi[Ls]
+                        contact_sum += lensing_isw_sum(proc_maps['u'], this_proc_b_maps['u'], proc_maps['v-isw'], this_proc_b_maps['v-isw'], proc_maps['s-isw'], this_proc_b_maps['s-isw'], self.base.nthreads)
                         del Phi_bd_isw
                         
                         t_init = time.time()
                         t2_num[ii] += -1./24.*np.sum(Ls*(Ls+1.)*Phi_sum*(1.+(Ms>0))).real*3./self.N_it
+                        t2_num[ii] += -contact_sum*self.base.A_pix/8./self.N_it
                         self.timers['lensing_summation'] += time.time()-t_init
-               
+                        
                         if compute_t0:
                             Phi_ab_lens = self._compute_lensing_Phi(this_proc_a_maps,this_proc_b_maps,add_sym=True,isw=False)
                             Phi_ab_isw = self._compute_lensing_Phi(this_proc_a_maps,this_proc_b_maps,add_sym=True,isw=True)
                             Phi_sum  = (4.*Phi_aa_isw*Phi_bb_isw.conj()+2.*Phi_ab_isw*Phi_ab_isw.conj())*self.C_lens_weight['TT'][Ls]
                             Phi_sum += (4.*Phi_aa_isw*Phi_bb_lens.conj()+2.*Phi_ab_isw*Phi_ab_lens.conj())*self.C_Tphi[Ls]
                             Phi_sum += (4.*Phi_aa_lens*Phi_bb_isw.conj()+2.*Phi_ab_lens*Phi_ab_isw.conj())*self.C_Tphi[Ls]
+                            contact_sum = lensing_isw_sum(this_proc_a_maps['u'], this_proc_b_maps['u'], this_proc_a_maps['v-isw'], this_proc_b_maps['v-isw'], this_proc_a_maps['s-isw'], this_proc_b_maps['s-isw'], self.base.nthreads)
                             del Phi_ab_isw, Phi_aa_isw, Phi_bb_isw
-                            
+                                
                             t_init = time.time()
                             t0_num[ii] += 1./24.*np.sum(Ls*(Ls+1.)*Phi_sum*(1.+(Ms>0))).real*3./self.N_it
+                            t0_num[ii] += contact_sum*self.base.A_pix/8./self.N_it
                             self.timers['lensing_summation'] += time.time()-t_init
-                        del Phi_sum
+                        del Phi_sum, contact_sum
                         
                     if t=='point-source':
                         t_init = time.time()
@@ -3762,6 +3808,9 @@ class TSpecTemplate():
             if 'v-isw' in self.to_compute:
                 if verb: print("Creating ISW V maps")
                 V_isw_maps = self._filter_pair(Uinv_a_lms, 'V-ISW')
+            if 's-isw' in self.to_compute:
+                if verb: print("Creating ISW S maps")
+                S_isw_maps = self._filter_pair(Uinv_a_lms, 'S-ISW')
             
             # Compute all P maps
             if verb and len(self.p_inds)>0: print("Creating P_{n,mu} maps")
@@ -4112,8 +4161,8 @@ class TSpecTemplate():
                 
                 if t=='isw-lensing':
                     # Lensing A_lens estimator
-                    fields1 = {'u':U_maps[0],'v-isw':V_isw_maps[0],'v':V_maps[0]}
-                    fields2 = {'u':U_maps[1],'v-isw':V_isw_maps[1],'v':V_maps[1]}
+                    fields1 = {'u':U_maps[0],'v-isw':V_isw_maps[0],'v':V_maps[0],'s-isw':S_isw_maps[0]}
+                    fields2 = {'u':U_maps[1],'v-isw':V_isw_maps[1],'v':V_maps[1],'s-isw':S_isw_maps[1]}
                     if verb: print("Computing Q-derivative for ISW-lensing")
                     
                     def _compute_lensing_W_isw(maps1,maps2,add_sym=False):
@@ -4145,7 +4194,7 @@ class TSpecTemplate():
                     W_12sym = _compute_lensing_W_isw(fields1,fields2,add_sym=True)
                     W_22 = _compute_lensing_W_isw(fields2,fields2)
                     
-                    def _get_Q(fields,W_maps):
+                    def _get_Q_exchange(fields,W_maps):
                         assert not self.pol
                         
                         Qlm = np.zeros((1+2*self.pol,np.sum(self.lfilt)),dtype=np.complex128)
@@ -4153,91 +4202,101 @@ class TSpecTemplate():
                         lpref0 = 0.5*np.sqrt(ls*(ls+1.))
                         Cl_Tps = self.C_Tphi[ls]
                         Cl_TTs = self.C_lens_weight['TT'][ls]
-                        # if self.pol:
-                        #     lprefp1 = 0.25*np.sqrt((ls+2.)*(ls-1.))
-                        #     lprefm1 = 0.25*np.sqrt((ls-2.)*(ls+3.))
-                        #     Cl_TEs = self.C_lens_weight['TE'][ls]
-                        #     Cl_EEs = self.C_lens_weight['EE'][ls]
-                        #     Cl_BBs = self.C_lens_weight['BB'][ls]
-                            
-                        ## Compute first term
-                        # Spin-0
+                           
+                        ## Compute first exchange term
                         input_map = np.real(fields['v-isw'][0]*W_maps[0]+fields['v'][0]*W_maps[1]+fields['v-isw'][0]*W_maps[2])
                         Qlm[0] = -self.base.to_lm([input_map],lmax=self.lmax)[0][self.lminfilt]
-                        
-                        # if self.pol:
-                        #     # Spin>0
-                        #     input_map = fields['v'][1]*W_maps-fields['v'][2]*W_maps.conj()
-                        #     lm_map_plus, lm_map_minus = self.base.to_lm_spin(input_map,input_map.conj(),spin=2,lmax=self.lmax)[:,self.lminfilt]
-                        #     Qlm[1] = -0.25*(lm_map_plus+lm_map_minus)
-                        #     Qlm[2] = 0.25j*(lm_map_plus-lm_map_minus)
                                    
-                        ## Compute second term
-                        # Z = T
-                        
+                        ## Compute second exchange term
                         # Compute ISW-ISW + ISW-Lens
                         input_map = fields['u'][0]*(W_maps[0]+W_maps[2]) 
-                        tmp_lm_plusA = Cl_Tps*np.sum(np.array([1,-1])[:,None]*self.base.to_lm_spin(input_map, input_map.conj(),spin=1,lmax=self.lmax),axis=0)[self.lminfilt]
+                        tmp_lm_plus = Cl_Tps*np.sum(np.array([1,-1])[:,None]*self.base.to_lm_spin(input_map, input_map.conj(),spin=1,lmax=self.lmax),axis=0)[self.lminfilt]
                         
                         # Repeat for Lens-ISW
                         input_map = fields['u'][0]*W_maps[1]
-                        tmp_lm_plusB = Cl_TTs*np.sum(np.array([1,-1])[:,None]*self.base.to_lm_spin(input_map, input_map.conj(),spin=1,lmax=self.lmax),axis=0)[self.lminfilt]
-                        
-                        # add to X = T
-                        Qlm[0] += lpref0*(tmp_lm_plusA+tmp_lm_plusB)
-
-                        # if self.pol:
-                        #     # also add to X = E
-                        #     Qlm[1] += lpref0*Cl_TEs*tmp_lm_plus
-                        # # Z = E
-                        # if self.pol:
-                        #     # lam=+1
-                        #     input_map = -fields['u'][1]*W_maps.conj()
-                        #     tmp_lm_plus, tmp_lm_minus = self.base.to_lm_spin(input_map,input_map.conj(),spin=1,lmax=self.lmax)[:,self.lminfilt]
-                        #     base = lprefp1*(tmp_lm_plus-tmp_lm_minus)
-                        #     Qlm[0] += Cl_TEs*base
-                        #     Qlm[1] += Cl_EEs*base
-                        #     Qlm[2] += lprefp1*(-1.0j)*Cl_BBs*(tmp_lm_plus+tmp_lm_minus)
-                        #     # lam=-1
-                        #     input_map = fields['u'][1]*W_maps
-                        #     tmp_lm_plus, tmp_lm_minus = self.base.to_lm_spin(input_map,input_map.conj(),spin=3,lmax=self.lmax)[:,self.lminfilt]
-                        #     base = lprefm1*(tmp_lm_plus-tmp_lm_minus)
-                        #     Qlm[0] += Cl_TEs*base
-                        #     Qlm[1] += Cl_EEs*base
-                        #     Qlm[2] += lprefm1*(-1.0j)*Cl_BBs*(tmp_lm_plus+tmp_lm_minus)    
-                        # # Z = B
-                        # if self.pol:
-                        #     # lam=+1
-                        #     input_map = -fields['u'][2]*W_maps.conj()
-                        #     tmp_lm_plus, tmp_lm_minus = self.base.to_lm_spin(input_map,input_map.conj(),spin=1,lmax=self.lmax)[:,self.lminfilt]
-                        #     base = lprefp1*1.0j*(tmp_lm_plus+tmp_lm_minus)
-                        #     Qlm[0] += Cl_TEs*base
-                        #     Qlm[1] += Cl_EEs*base
-                        #     Qlm[2] += lprefp1*Cl_BBs*(tmp_lm_plus-tmp_lm_minus)
-                        #     # lam=-1
-                        #     input_map = fields['u'][2]*W_maps
-                        #     tmp_lm_plus, tmp_lm_minus = self.base.to_lm_spin(input_map,input_map.conj(),spin=3,lmax=self.lmax)[:,self.lminfilt]
-                        #     base = lprefm1*1.0j*(tmp_lm_plus+tmp_lm_minus)
-                        #     Qlm[0] += Cl_TEs*base
-                        #     Qlm[1] += Cl_EEs*base
-                        #     Qlm[2] += lprefm1*Cl_BBs*(tmp_lm_plus-tmp_lm_minus)
+                        tmp_lm_plus += Cl_TTs*np.sum(np.array([1,-1])[:,None]*self.base.to_lm_spin(input_map, input_map.conj(),spin=1,lmax=self.lmax),axis=0)[self.lminfilt]
+                        Qlm[0] += lpref0*tmp_lm_plus
                         
                         return Qlm/2. # halving to get correct symmetries later
                     
-                    ### Assemble outputs
-                    # 111
-                    Qs[0,ii] += 12*_get_Q(fields1, W_11)
+                    def _get_Q_contact(sym_type='111'):
+                        assert not self.pol
+                        
+                        Qlm = np.zeros((1+2*self.pol,np.sum(self.lfilt)),dtype=np.complex128)
+                        ls = self.ls
+                        Cl_Tps = self.C_Tphi[ls]
+                        Cl_TTs = self.C_lens_weight['TT'][ls]
+                        
+                        # First term
+                        if sym_type=='111':
+                            input_map = 6.*np.real(fields1['v-isw'][0]*(-fields1['s-isw'][0]*fields1['v-isw'][0].conjugate()+fields1['s-isw'][1]*fields1['v-isw'][0]))
+                        elif sym_type=='222':
+                            input_map = 6.*np.real(fields2['v-isw'][0]*(-fields2['s-isw'][0]*fields2['v-isw'][0].conjugate()+fields2['s-isw'][1]*fields2['v-isw'][0]))
+                        elif sym_type=='112':
+                            input_map = 2.*np.real(fields1['v-isw'][0]*(-2.*fields1['s-isw'][0]*fields2['v-isw'][0].conjugate()+2.*fields1['s-isw'][1]*fields2['v-isw'][0]-fields2['s-isw'][0]*fields1['v-isw'][0].conjugate()+fields2['s-isw'][1]*fields1['v-isw'][0]))
+                        elif sym_type=='122':
+                            input_map = 2.*np.real(fields2['v-isw'][0]*(-2.*fields2['s-isw'][0]*fields1['v-isw'][0].conjugate()+2.*fields2['s-isw'][1]*fields1['v-isw'][0]-fields1['s-isw'][0]*fields2['v-isw'][0].conjugate()+fields1['s-isw'][1]*fields2['v-isw'][0]))
+                        Qlm[0] = 1./8.*self.base.to_lm(input_map[None],lmax=self.lmax)[0][self.lminfilt]
+                        
+                        # Second term, spin0
+                        if sym_type=='111':
+                            input_map = -6.*np.real(fields1['u'][0]*fields1['v-isw'][0]*fields1['v-isw'][0].conj())
+                        elif sym_type=='222':
+                            input_map = -6.*np.real(fields2['u'][0]*fields2['v-isw'][0]*fields2['v-isw'][0].conj())
+                        elif sym_type=='112':
+                            input_map =  -4.*np.real(fields1['u'][0]*fields1['v-isw'][0]*fields2['v-isw'][0].conj())
+                            input_map += -2.*np.real(fields2['u'][0]*fields1['v-isw'][0]*fields1['v-isw'][0].conj())
+                        elif sym_type=='122':
+                            input_map  = -4.*np.real(fields2['u'][0]*fields1['v-isw'][0]*fields2['v-isw'][0].conj())
+                            input_map += -2.*np.real(fields1['u'][0]*fields2['v-isw'][0]*fields2['v-isw'][0].conj())
+                        Qlm[0] += 1./8.*ls*(ls+1.)*Cl_TTs*self.base.to_lm(input_map[None],lmax=self.lmax)[0][self.lminfilt]
+
+                        # Second term, spin(+-2)
+                        if sym_type=='111':
+                            input_map = 3.*fields1['u'][0]*fields1['v-isw'][0].conjugate()*fields1['v-isw'][0].conjugate()
+                        elif sym_type=='222':
+                            input_map = 3.*fields2['u'][0]*fields2['v-isw'][0].conjugate()*fields2['v-isw'][0].conjugate()
+                        elif sym_type=='112':
+                            input_map = fields1['v-isw'][0].conjugate()*(2*fields1['u'][0]*fields2['v-isw'][0].conjugate()+fields2['u'][0]*fields1['v-isw'][0].conjugate())
+                        elif sym_type=='122':
+                            input_map = fields2['v-isw'][0].conjugate()*(2*fields2['u'][0]*fields1['v-isw'][0].conjugate()+fields1['u'][0]*fields2['v-isw'][0].conjugate())
+                        Qlm[0] += 1./8.*np.sqrt(ls*(ls+1.)*(ls-1.)*(ls+2.))*Cl_TTs*self.base.to_lm_spin(input_map, input_map.conjugate(),spin=2,lmax=self.lmax)[:,self.lminfilt].sum(axis=0)
+                        
+                        # Third term, spin(+-1)
+                        if sym_type=='111':
+                            input_map = 3*fields1['u'][0]*(-fields1['s-isw'][0]*fields1['v-isw'][0].conj()+fields1['s-isw'][1]*fields1['v-isw'][0])
+                        if sym_type=='222':
+                            input_map = 3*fields2['u'][0]*(-fields2['s-isw'][0]*fields2['v-isw'][0].conj()+fields2['s-isw'][1]*fields2['v-isw'][0])
+                        if sym_type=='112':
+                            input_map  = fields1['u'][0]*(-fields1['s-isw'][0]*fields2['v-isw'][0].conj()+fields1['s-isw'][1]*fields2['v-isw'][0])
+                            input_map += fields1['u'][0]*(-fields2['s-isw'][0]*fields1['v-isw'][0].conj()+fields2['s-isw'][1]*fields1['v-isw'][0])
+                            input_map += fields2['u'][0]*(-fields1['s-isw'][0]*fields1['v-isw'][0].conj()+fields1['s-isw'][1]*fields1['v-isw'][0])
+                        if sym_type=='122':
+                            input_map  = fields1['u'][0]*(-fields2['s-isw'][0]*fields2['v-isw'][0].conj()+fields2['s-isw'][1]*fields2['v-isw'][0])
+                            input_map += fields2['u'][0]*(-fields1['s-isw'][0]*fields2['v-isw'][0].conj()+fields1['s-isw'][1]*fields2['v-isw'][0])
+                            input_map += fields2['u'][0]*(-fields2['s-isw'][0]*fields1['v-isw'][0].conj()+fields2['s-isw'][1]*fields1['v-isw'][0])
+                        Qlm[0] += -1./4.*np.sqrt(ls*(ls+1.))*Cl_Tps*np.sum(np.asarray([1,-1])[:,None]*self.base.to_lm_spin(input_map, input_map.conjugate(),spin=1,lmax=self.lmax)[:,self.lminfilt],axis=0)
+                        
+                        return Qlm/2.
+                    
+                    # ### Assemble outputs
+                    # # 111
+                    Qs[0,ii] += 12*_get_Q_exchange(fields1, W_11)
+                    Qs[0,ii] += 4*_get_Q_contact('111')
                     
                     # 222
-                    Qs[1,ii] += 12*_get_Q(fields2, W_22)
+                    Qs[1,ii] += 12*_get_Q_exchange(fields2, W_22)
+                    Qs[1,ii] += 4*_get_Q_contact('222')
                     
                     # 112
-                    Qs[2,ii] += 4*_get_Q(fields1, W_12sym)
-                    Qs[2,ii] += 4*_get_Q(fields2, W_11)
-
+                    Qs[2,ii] += 4*_get_Q_exchange(fields1, W_12sym)
+                    Qs[2,ii] += 4*_get_Q_exchange(fields2, W_11)
+                    Qs[2,ii] += 4*_get_Q_contact('112')
+                    
                     # 122
-                    Qs[3,ii] += 4*_get_Q(fields2, W_12sym)
-                    Qs[3,ii] += 4*_get_Q(fields1, W_22)
+                    Qs[3,ii] += 4*_get_Q_exchange(fields2, W_12sym)
+                    Qs[3,ii] += 4*_get_Q_exchange(fields1, W_22)
+                    Qs[3,ii] += 4*_get_Q_contact('122')
                     
                     del fields1, fields2, W_11, W_22, W_12sym
                 

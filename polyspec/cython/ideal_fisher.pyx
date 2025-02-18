@@ -957,3 +957,29 @@ cdef double _zeta_sum_sym3(double[:] zetaBB_l, double[:] zetaCC_l,
         tmp += CCsum*CCsum*CCsum*CCsum+CsCsum*CsCsum*CsCsum*CsCsum+4*CsCsum*CsCsum*CCsum*CCsum
         musum += tmp*w_mus[imu]
     return musum
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+@cython.cdivision(True)
+cpdef double lensing_isw_sum_sym(double complex[:,::1] u1, double complex[:,::1] v1, double complex[:,::1] s1, int nthreads):
+    """Compute the sum over ISW u, v, s maps"""
+    cdef double summ=0.
+    cdef int i, npix = u1.shape[1]
+    for i in prange(npix, nogil=True,schedule='static',num_threads=nthreads):
+        summ += creal(u1[0,i]*v1[0,i]*(-v1[0,i].conjugate()*s1[0,i]+v1[0,i]*s1[1,i]))
+    return summ      
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+@cython.cdivision(True)
+cpdef double lensing_isw_sum(double complex[:,::1] u1, double complex[:,::1] u2, double complex[:,::1] v1, double complex[:,::1] v2, double complex[:,::1] s1, double complex[:,::1] s2, int nthreads):
+    """Compute the sum over ISW u, v, s maps"""
+    cdef double summ=0.
+    cdef int i, npix = u1.shape[1]
+    for i in prange(npix, nogil=True,schedule='static',num_threads=nthreads):
+        summ += 2.*creal(u1[0,i]*v1[0,i]*(-v2[0,i].conjugate()*s2[0,i]+v2[0,i]*s2[1,i]))
+        summ += 2.*creal(u2[0,i]*v2[0,i]*(-v1[0,i].conjugate()*s1[0,i]+v1[0,i]*s1[1,i]))
+        summ += creal(u1[0,i]*v2[0,i]*(-v2[0,i].conjugate()*s1[0,i]+v2[0,i]*s1[1,i]))
+        summ += creal(u2[0,i]*v1[0,i]*(-v1[0,i].conjugate()*s2[0,i]+v1[0,i]*s2[1,i]))
+    return summ      
+

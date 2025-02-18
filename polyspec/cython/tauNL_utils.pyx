@@ -212,7 +212,7 @@ cdef class tauNL_utils:
             for i2 in xrange(n2):
                 out[i1,i2] = Ac[i1,i2]*B[i1,i2]
         return out
-
+    
     @cython.boundscheck(False)
     @cython.wraparound(False)
     @cython.cdivision(True)
